@@ -41,7 +41,6 @@
 
 #define CL_DEVICE_PCIE_BDF              0x1120  // BUS/DEVICE/FUNCTION
 #include "opencl_util.h"
-//g++ -O2 -o decoder data_decoder.cpp data_decoder_host.cpp -I/local-scratch/Xilinx/Vitis_HLS/2021.2/include/ -L/opt/xilinx/xrt/lib/ -lstdc++ -lpthread -lrt -lgmp -lmpfr -ltapa -lfrt -lglog -lgflags -lOpenCL
 
 extern "C" {
     int aio_write(struct aiocb*);
@@ -62,9 +61,10 @@ typedef ap_uint<AXI_WIDTH_HH> _128b;
 typedef ap_uint<32> _32b;
 
 const uint32_t RSIZE_DIV = 16;   //for SR it should be 4 else 16
+const uint32_t PIPELINE_DEPTH = 576;
 uint32_t nrows = 0;
-std::string orc_file = "/localhdd/awa159/orc_dataset/orc_decData/8_bit_data_70x_orc.orc";//"test_data/8_bit.orc";
-std::string check_file = "/localhdd/awa159/orc_dataset/orc_decData/8_bit_data_70x.bin";//test_data/8_bit_data.bin"; 
+std::string orc_file = "test_data/8_bit.orc";
+std::string check_file = "test_data/8_bit_data.bin"; 
 
 const uint8_t SR = 0;
 const uint8_t DIRECT = 1;

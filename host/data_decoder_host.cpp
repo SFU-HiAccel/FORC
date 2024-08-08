@@ -73,14 +73,14 @@ int main(int argc, char* argv[]) {
     for (uint64_t col = 0; col < numberColumns; ++col) {
         orc::ColumnEncodingKind encoding = reader->getStripe(0)->getColumnEncoding(col);
         #ifdef PRINT_DEBUG
-        std::cout << "         { \"column\": " << col << ", \"encoding\": \""
-                << columnEncodingKindToString(encoding) << "\"";
-        if (encoding == orc::ColumnEncodingKind_DICTIONARY ||
-            encoding == orc::ColumnEncodingKind_DICTIONARY_V2) {
-            std::cout << ", \"count\": " << reader->getStripe(0)->getDictionarySize(col);
-        }
-        std::cout << " }";
-        std::cout << std::endl;
+            std::cout << "         { \"column\": " << col << ", \"encoding\": \""
+                    << columnEncodingKindToString(encoding) << "\"";
+            if (encoding == orc::ColumnEncodingKind_DICTIONARY ||
+                encoding == orc::ColumnEncodingKind_DICTIONARY_V2) {
+                std::cout << ", \"count\": " << reader->getStripe(0)->getDictionarySize(col);
+            }
+            std::cout << " }";
+            std::cout << std::endl;
         #endif
     }
 
@@ -92,13 +92,13 @@ int main(int argc, char* argv[]) {
         for (uint64_t streamIdx = 0; streamIdx < stripe->getNumberOfStreams(); ++streamIdx) {
             std::unique_ptr<orc::StreamInformation> stream = stripe->getStreamInformation(streamIdx);
             #ifdef PRINT_DEBUG
-            if (streamIdx != 0) {
-                std::cout << ",\n";
-            }
-            std::cout << "        { \"id\": " << streamIdx << ", \"column\": " << stream->getColumnId()
-                    << ", \"kind\": \"" << streamKindToString(stream->getKind())
-                    << "\", \"offset\": " << stream->getOffset() << ", \"length\": " << stream->getLength()
-                    << " }";
+                if (streamIdx != 0) {
+                    std::cout << ",\n";
+                }
+                std::cout << "        { \"id\": " << streamIdx << ", \"column\": " << stream->getColumnId()
+                        << ", \"kind\": \"" << streamKindToString(stream->getKind())
+                        << "\", \"offset\": " << stream->getOffset() << ", \"length\": " << stream->getLength()
+                        << " }";
             #endif
             if (stream->getKind() == 1) {
                 // std::cout << "Data stream found" << std::endl;
@@ -130,6 +130,7 @@ int main(int argc, char* argv[]) {
     uint8_t* data_in_HBM[BUFFERS_IN]; 
     uint8_t* data_out_HBM[BUFFERS_OUT];
     
+    uint32_t max_input_size = max_data_length+PIPELINE_DEPTH;
     uint32_t max_output_size = max_stripe_rows; //MAX OUTPUT SIZE BYTES = (max_stripe_rows*4) , div 4 as data is divided in 4 ports 
     uint32_t max_track_size = max_stripe_rows*2; //max it can be 2x of the one data port size
 
@@ -137,7 +138,7 @@ int main(int argc, char* argv[]) {
     //in ports
     for(int i = 0; i < BUFFERS_IN; i++)
     {
-        data_in_HBM[i] = reinterpret_cast<uint8_t*>(aligned_alloc(ALIGNED_BYTES, max_data_length));
+        data_in_HBM[i] = reinterpret_cast<uint8_t*>(aligned_alloc(ALIGNED_BYTES, max_input_size));
     }
     //out ports
     for (int i = 0; i < 8; ++i) {
@@ -311,7 +312,7 @@ int main(int argc, char* argv[]) {
             {
                 mIN_HBM[i] = {XCL_MEM_TOPOLOGY | (unsigned int)(i+16), data_in_HBM[i], 0};
                 buffer_in_HBM[i] = cl::Buffer(context_, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_READ_ONLY,
-                                (size_t)(max_data_length), &mIN_HBM[i], &err);     // CL_MEM_WRITE_ONLY, CL_MEM_READ_ONLY, CL_MEM_READ_WRITE
+                                (size_t)(max_input_size), &mIN_HBM[i], &err);     // CL_MEM_WRITE_ONLY, CL_MEM_READ_ONLY, CL_MEM_READ_WRITE
                 CL_CHECK(err);
             }
 
@@ -344,7 +345,7 @@ int main(int argc, char* argv[]) {
                 KRNL_file_size_bytes = KRNL_file_size_bytes + (64 - file_size_rem);
             }
 
-            KRNL_file_size_bytes = (KRNL_file_size_bytes + 576);  //the pipeline depth of FPGA 64*8=512 + 64 = 576
+            KRNL_file_size_bytes = (KRNL_file_size_bytes + PIPELINE_DEPTH);  //the pipeline depth of FPGA 64*8=512 + 64 = 576
             KRNL_file_size_bytes = KRNL_file_size_bytes/64;
 
             for (const auto& kvp : kernels_) {
@@ -369,12 +370,16 @@ int main(int argc, char* argv[]) {
             std::vector<cl::Event> kernel_events(3);
             std::vector<cl::Event> kernel_wait_events;
 
+            memset(data_in_HBM[0], 0, max_input_size);
+            memset(data_in_HBM[1], 0, max_input_size);
+
             async_readnorm(&aio_rf, (void *)(data_in_HBM[0]), nvmeFd, Data_lengths[0], Data_offsets[0]); 
             while( aio_error(&aio_rf) == EINPROGRESS ) {;}
             ret_aio = aio_return (&aio_rf);
             printf("Bytes Read. %d \n", ret_aio);
 
-            CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_in_HBM[0])} , 0 , nullptr, &kernel_events[0]));  //DRAM FPGA
+            CL_CHECK(cmd_.enqueueWriteBuffer(buffer_in_HBM[0], CL_FALSE, 0, max_input_size, data_in_HBM[0], nullptr, &kernel_events[0]));
+            // CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_in_HBM[0])} , 0 , nullptr, &kernel_events[0]));  //DRAM FPGA
             kernel_wait_events.resize(0);
             CL_CHECK(cmd_.flush());
             CL_CHECK(cmd_.finish());
@@ -443,8 +448,6 @@ int main(int argc, char* argv[]) {
 
             std::cout << "CPU-2-FPGA Transfer time(ms): " << (load_time_ns) * 1e-6 << std::endl;
             std::cout << "FPGA-2-CPU Transfer time(ms): " << (store_time_ns) * 1e-6 << std::endl;
-            std::cout << "CPU-2-FPGA throughput(GB/s): " << ((float)(Data_lengths[0])/(float)(load_time_ns)) << std::endl;
-            std::cout << "FPGA-2-CPU throughput(GB/s): " << ((float)((stripe_rows[0]*4))/(float)(store_time_ns)) << std::endl;
         #endif
         ///////Launching KERNEL DATAFLOW////////
             //non multiple RL adjustment
@@ -471,12 +474,17 @@ int main(int argc, char* argv[]) {
             auto FPGATimeE = std::chrono::steady_clock::now();
             auto FPGATime = std::chrono::duration_cast<std::chrono::microseconds>(asyncTimeE - asyncTimeS);
 
+            auto C2FTimeS = std::chrono::steady_clock::now();
+            auto C2FTimeE = std::chrono::steady_clock::now();
+            auto C2FTime = std::chrono::duration_cast<std::chrono::microseconds>(asyncTimeE - asyncTimeS);
+
             auto tempTimeA = std::chrono::steady_clock::now();
             auto tempTimeB = std::chrono::steady_clock::now();
             auto tempTime = std::chrono::duration_cast<std::chrono::microseconds>(tempTimeA - tempTimeB);
 
             double time_fpga[NITERS] = {0.0F};
             double time_read[NITERS] = {0.0F};
+            double time_c2f[NITERS] = {0.0F};
             double time_async[NITERS] = {0.0F};
             // async_readnorm(void* data_in, int nvmeFd, int vector_size_bytes, int offset)
             // std::cout << "Starting DF, Total Iters: " << NITERS << std::endl;
@@ -504,14 +512,17 @@ int main(int argc, char* argv[]) {
                 //CPU_2_FPGA
                 if((i >= 1) && (i < (stripeCount+1)))
                 {
+                    int Ssize = Data_lengths[i-1]+PIPELINE_DEPTH;
                     if(((i-1)%2) == 0)
                     {
-                        cmd_.enqueueMigrateMemObjects({(buffer_in_HBM[0])} , 0 , nullptr, &C2F_events[i-1]);
+                        cmd_.enqueueWriteBuffer(buffer_in_HBM[0], CL_FALSE, 0, Ssize, data_in_HBM[0], nullptr, &C2F_events[i-1]);
+                        // cmd_.enqueueMigrateMemObjects({(buffer_in_HBM[0])} , 0 , nullptr, &C2F_events[i-1]);
                         // std::cout << "C2F_E" << std::endl;
                     }
                     else
                     {
-                        cmd_.enqueueMigrateMemObjects({(buffer_in_HBM[1])} , 0 , nullptr, &C2F_events[i-1]);
+                        cmd_.enqueueWriteBuffer(buffer_in_HBM[1], CL_FALSE, 0, Ssize, data_in_HBM[1], nullptr, &C2F_events[i-1]);
+                        // cmd_.enqueueMigrateMemObjects({(buffer_in_HBM[1])} , 0 , nullptr, &C2F_events[i-1]);
                         // std::cout << "C2F_O" << std::endl;
                     }
                     // std::cout << "C2F" << std::endl;
@@ -529,7 +540,7 @@ int main(int argc, char* argv[]) {
                     {
                         KRNL_file_size_bytes = KRNL_file_size_bytes + (64 - file_size_rem);
                     }
-                    KRNL_file_size_bytes = (KRNL_file_size_bytes + 576);  //the pipeline depth of FPGA 64*8=512 + 64 = 576
+                    KRNL_file_size_bytes = (KRNL_file_size_bytes + PIPELINE_DEPTH);  //the pipeline depth of FPGA 64*8=512 + 64 = 576
                     KRNL_file_size_bytes = KRNL_file_size_bytes/64;
 
                     if(((i-2)%2) == 0)
@@ -604,7 +615,26 @@ int main(int argc, char* argv[]) {
                 time_async[i] = static_cast<double>(asyncTime.count());
 
                 ///WAITS///
-                
+
+                C2FTimeS = std::chrono::steady_clock::now();
+                //CPU_2_FPGA
+                if((i >= 1) && (i < (stripeCount+1)))
+                {
+                    clWaitForEvents(one,(cl_event*)(&C2F_events[i-1]));
+                    if(((i-1)%2) == 0)
+                    {
+                        memset(data_in_HBM[0], 0, max_input_size);
+                    }
+                    else
+                    {
+                        memset(data_in_HBM[1], 0, max_input_size);
+                    }
+                    // std::cout << "C2F Wait" << std::endl;
+                }
+                C2FTimeE = std::chrono::steady_clock::now();
+                C2FTime = std::chrono::duration_cast<std::chrono::microseconds>(C2FTimeE - C2FTimeS);
+                time_c2f[i] = static_cast<double>(C2FTime.count());
+
                 readTimeS = std::chrono::steady_clock::now();
                 //IO READ
                 if(i < stripeCount)
@@ -612,14 +642,20 @@ int main(int argc, char* argv[]) {
                     if(i%2 == 0)
                     {
                         while( aio_error(&aio_rf) == EINPROGRESS ) {;}
-
-                        // std::cout << "Bytes Read: " << aio_return (&aio_rf) << std::endl;
+                        int ret = aio_return (&aio_rf);
+                        if(ret <= 0)
+                        {
+                            std::cerr << "Read Error. Bytes Read: " << ret << std::endl;
+                        }
                     }
                     else
                     {
                         while( aio_error(&aio_rf1) == EINPROGRESS ) {;}
-
-                        // std::cout << "Bytes Read: " << aio_return (&aio_rf1) << std::endl;
+                        int ret = aio_return (&aio_rf1);
+                        if(ret <= 0)
+                        {
+                            std::cerr << "Read Error. Bytes Read: " << ret << std::endl;
+                        }
                     }
                 }   
                 readTimeE = std::chrono::steady_clock::now();
@@ -629,13 +665,6 @@ int main(int argc, char* argv[]) {
 
                 
                 FPGATimeS = std::chrono::steady_clock::now();
-                //CPU_2_FPGA
-                if((i >= 1) && (i < (stripeCount+1)))
-                {
-                    clWaitForEvents(one,(cl_event*)(&C2F_events[i-1]));
-                    // std::cout << "C2F Wait" << std::endl;
-                }
-
                 //KERNEL CALL
                 if((i >= 2) && (i < (stripeCount+2)))
                 {
@@ -713,6 +742,7 @@ int main(int argc, char* argv[]) {
                         total_read += time_fpga[s];
                         
                         std::cout << std::dec << "Total Async Call[" <<s<< "] Time (us): " << time_async[s] << std::endl;
+                        std::cout << std::dec << "Total C2F[" <<s<< "] Time (us): " << time_c2f[s] << std::endl;
                         std::cout << std::dec << "Total Read[" <<s<< "] Time (us): " << time_read[s] << std::endl;
                         std::cout << std::dec << "Total FPGA[" <<s<< "] Time (us): " << time_fpga[s] << std::endl;
                     }

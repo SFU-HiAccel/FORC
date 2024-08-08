@@ -42,7 +42,6 @@
 
 #define CL_DEVICE_PCIE_BDF              0x1120  // BUS/DEVICE/FUNCTION
 #include "opencl_util.h"
-//g++ -O2 -o decoder data_decoder.cpp data_decoder_host.cpp -I/local-scratch/Xilinx/Vitis_HLS/2021.2/include/ -L/opt/xilinx/xrt/lib/ -lstdc++ -lpthread -lrt -lgmp -lmpfr -ltapa -lfrt -lglog -lgflags -lOpenCL
 
 extern "C" {
     int aio_write(struct aiocb*);
@@ -53,6 +52,7 @@ extern "C" {
 }
 
 #define WAIT_MAX 2147483
+// #define PRINT_DEBUG
 
 int nvmeFd = -1;
 const uint32_t AXI_WIDTH = 512;
@@ -68,6 +68,7 @@ const uint32_t ALIGNED_BYTES = 4096;
 // const std::string TARGET_DEVICE_NAME = "xilinx_u280_xdma_201920_3";
 
 const uint32_t RSIZE_DIV = 16;   //for SR it should be 4 else 16
+const uint32_t PIPELINE_DEPTH = 576;
 uint32_t nrows = 0;
 std::string orc_file = "test_data/8_bit.orc";
 std::string check_file = "test_data/8_bit_data.bin"; 

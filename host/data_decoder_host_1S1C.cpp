@@ -15,6 +15,7 @@ DEFINE_string(bitstream, "", "path to bitstream file, run csim if empty");
 
 void async_readnorm(struct aiocb* aio_rf, void* data_in, int Fd, int vector_size_bytes, int offset)
 {
+    memset(data_in, 0, vector_size_bytes+PIPELINE_DEPTH);
     aio_rf->aio_buf = data_in;
     aio_rf->aio_fildes = Fd;
     aio_rf->aio_nbytes = vector_size_bytes;
@@ -105,7 +106,7 @@ int main(int argc, char* argv[]) {
     {
         KRNL_file_size_bytes = Data_length;
     }
-    KRNL_file_size_bytes = KRNL_file_size_bytes + 576;  //the pipeline depth of FPGA 64*8=512 + 64 = 576
+    KRNL_file_size_bytes = KRNL_file_size_bytes + PIPELINE_DEPTH;  //the pipeline depth of FPGA 64*8=512 + 64 = 576
     std::cout << "KRNL_file_size_bytes: " << KRNL_file_size_bytes << " bytes" << std::endl;
     std::cout << "Number of rows are: " << nrows << std::endl;
     
