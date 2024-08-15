@@ -25,6 +25,14 @@ void async_readnorm(struct aiocb* aio_rf, void* data_in, int Fd, int vector_size
     }
 }
 
+void writeZeros(void* ptr, uint32_t offset, uint32_t size) {
+    // Calculate the address with the offset
+    void* target = static_cast<char*>(ptr) + offset;
+
+    // Write zeros to the memory region
+    memset(target, 0, size);
+}
+
 int verif_all(int32_t *datain0, int32_t *datain1, int32_t *datain2, int32_t *datain3, int32_t *track);
 
 void update_patch_data(int32_t *datain0, int32_t *datain1, int32_t *datain2, int32_t *datain3, int32_t *track);
@@ -38,7 +46,6 @@ int main(int argc, char* argv[]) {
     std::vector<uint32_t> Data_lengths;
     std::vector<uint64_t> stripe_rows;  // Array to store the number of rows in each stripe
     uint32_t Data_offset = 0;
-    uint32_t Data_length = 0;
     uint32_t KRNL_Data_Write = 0;
     uint32_t wait_count = 32;  //max FIFO depth for hardware and try 2147483 for csim
     std::string nvme_file;
@@ -130,7 +137,7 @@ int main(int argc, char* argv[]) {
     uint8_t* data_in_HBM[BUFFERS_IN]; 
     uint8_t* data_out_HBM[BUFFERS_OUT];
     
-    uint32_t max_input_size = max_data_length+PIPELINE_DEPTH;
+    uint32_t max_input_size = max_data_length+PIPELINE_DEPTH+64;
     uint32_t max_output_size = max_stripe_rows; //MAX OUTPUT SIZE BYTES = (max_stripe_rows*4) , div 4 as data is divided in 4 ports 
     uint32_t max_track_size = max_stripe_rows*2; //max it can be 2x of the one data port size
 
@@ -335,7 +342,7 @@ int main(int argc, char* argv[]) {
             }
 
             std::cout << "Data in buffer size(MB): " << (max_data_length / (1024.0 * 1024.0)) << std::endl;
-            std::cout << "Data out buffer size F(MB): " << (max_output_size / (1024.0 * 1024.0)) << std::endl;
+            std::cout << "Data out buffer size(MB): " << (max_output_size / (1024.0 * 1024.0)) << std::endl;
 
             cl::Kernel kernelDD;
             KRNL_file_size_bytes = Data_lengths[0];
@@ -391,6 +398,9 @@ int main(int argc, char* argv[]) {
             kernelDD.setArg(3, buffer_out_HBM[4]);
             kernelDD.setArg(4, buffer_out_HBM[6]);
             kernelDD.setArg(5, buffer_out_HBM[8]);  ///6,7 already set use old
+            kernelDD.setArg(6, sizeof(wait_count), &wait_count);
+            kernelDD.setArg(7, sizeof(KRNL_file_size_bytes), &KRNL_file_size_bytes);
+
             CL_CHECK(cmd_.flush());
             CL_CHECK(cmd_.finish());
             std::cout << "Kernel Arg Set" << std::endl;
@@ -474,9 +484,9 @@ int main(int argc, char* argv[]) {
             auto FPGATimeE = std::chrono::steady_clock::now();
             auto FPGATime = std::chrono::duration_cast<std::chrono::microseconds>(asyncTimeE - asyncTimeS);
 
-            auto C2FTimeS = std::chrono::steady_clock::now();
-            auto C2FTimeE = std::chrono::steady_clock::now();
-            auto C2FTime = std::chrono::duration_cast<std::chrono::microseconds>(asyncTimeE - asyncTimeS);
+            auto wrTimeS = std::chrono::steady_clock::now();
+            auto wrTimeE = std::chrono::steady_clock::now();
+            auto wrTime = std::chrono::duration_cast<std::chrono::microseconds>(asyncTimeE - asyncTimeS);
 
             auto tempTimeA = std::chrono::steady_clock::now();
             auto tempTimeB = std::chrono::steady_clock::now();
@@ -484,57 +494,267 @@ int main(int argc, char* argv[]) {
 
             double time_fpga[NITERS] = {0.0F};
             double time_read[NITERS] = {0.0F};
-            double time_c2f[NITERS] = {0.0F};
+            double time_wr[NITERS] = {0.0F};
             double time_async[NITERS] = {0.0F};
             // async_readnorm(void* data_in, int nvmeFd, int vector_size_bytes, int offset)
             // std::cout << "Starting DF, Total Iters: " << NITERS << std::endl;
             // std::cout << "stripeCount: " << stripeCount << std::endl;
 
             auto dfstart = std::chrono::steady_clock::now();
-            for (int i = 0; i < NITERS; i++)
+            if(dataflow)
             {
-                // std::cout << "ITER COUNT: " << i << std::endl;
-                asyncTimeS = std::chrono::steady_clock::now();
-                //IO READ
-                if(i < stripeCount)
+                std::cout << "***Dataflow Implementation***" << std::endl;
+                dfstart = std::chrono::steady_clock::now();
+                for (int i = 0; i < NITERS; i++)
                 {
-                    if((i%2) == 0)
+                    // std::cout << "ITER COUNT: " << i << std::endl;
+                    asyncTimeS = std::chrono::steady_clock::now();
+                    //IO READ
+                    if(i < stripeCount)
                     {
-                        async_readnorm(&aio_rf, (void *)(data_in_HBM[0]), nvmeFd, Data_lengths[i], Data_offsets[i]); 
-                    }
-                    else
-                    {
-                        async_readnorm(&aio_rf1, (void *)(data_in_HBM[1]), nvmeFd, Data_lengths[i], Data_offsets[i]); 
-                    }
-                }   
+                        if((i%2) == 0)
+                        {
+                            async_readnorm(&aio_rf, (void *)(data_in_HBM[0]), nvmeFd, Data_lengths[i], Data_offsets[i]); 
+                            // std::cout << "IO_E" << std::endl;
+                        }
+                        else
+                        {
+                            async_readnorm(&aio_rf1, (void *)(data_in_HBM[1]), nvmeFd, Data_lengths[i], Data_offsets[i]); 
+                            // std::cout << "IO_O" << std::endl;
+                        }
+                    }   
 
-                // tempTimeA = std::chrono::steady_clock::now();
-                //CPU_2_FPGA
-                if((i >= 1) && (i < (stripeCount+1)))
-                {
-                    int Ssize = Data_lengths[i-1]+PIPELINE_DEPTH;
-                    if(((i-1)%2) == 0)
+                    // tempTimeA = std::chrono::steady_clock::now();
+                    //CPU_2_FPGA
+                    if((i >= 1) && (i < (stripeCount+1)))
                     {
-                        cmd_.enqueueWriteBuffer(buffer_in_HBM[0], CL_FALSE, 0, Ssize, data_in_HBM[0], nullptr, &C2F_events[i-1]);
-                        // cmd_.enqueueMigrateMemObjects({(buffer_in_HBM[0])} , 0 , nullptr, &C2F_events[i-1]);
-                        // std::cout << "C2F_E" << std::endl;
+                        int Ssize = Data_lengths[i-1]+PIPELINE_DEPTH+64;
+                        if(((i-1)%2) == 0)
+                        {
+                            CL_CHECK(cmd_.enqueueWriteBuffer(buffer_in_HBM[0], CL_FALSE, 0, Ssize, data_in_HBM[0], nullptr, &C2F_events[i-1]));
+                            // cmd_.enqueueMigrateMemObjects({(buffer_in_HBM[0])} , 0 , nullptr, &C2F_events[i-1]);
+                            // std::cout << "C2F_E" << std::endl;
+                        }
+                        else
+                        {
+                            CL_CHECK(cmd_.enqueueWriteBuffer(buffer_in_HBM[1], CL_FALSE, 0, Ssize, data_in_HBM[1], nullptr, &C2F_events[i-1]));
+                            // cmd_.enqueueMigrateMemObjects({(buffer_in_HBM[1])} , 0 , nullptr, &C2F_events[i-1]);
+                            // std::cout << "C2F_O" << std::endl;
+                        }
+                        // std::cout << "C2F" << ":" << i-1 << std::endl;
                     }
-                    else
+                    // tempTimeB = std::chrono::steady_clock::now();
+                    // tempTime = std::chrono::duration_cast<std::chrono::microseconds>(tempTimeB - tempTimeA);
+                    // std::cout << "time_async C2F: " << static_cast<double>(tempTime.count()) <<std::endl;
+
+                    //KERNEL CALL
+                    if((i >= 2) && (i < (stripeCount+2)))
                     {
-                        cmd_.enqueueWriteBuffer(buffer_in_HBM[1], CL_FALSE, 0, Ssize, data_in_HBM[1], nullptr, &C2F_events[i-1]);
-                        // cmd_.enqueueMigrateMemObjects({(buffer_in_HBM[1])} , 0 , nullptr, &C2F_events[i-1]);
-                        // std::cout << "C2F_O" << std::endl;
+                        KRNL_file_size_bytes = Data_lengths[i-2];
+                        file_size_rem = KRNL_file_size_bytes%64;
+                        if(file_size_rem!=0)
+                        {
+                            KRNL_file_size_bytes = KRNL_file_size_bytes + (64 - file_size_rem);
+                        }
+                        KRNL_file_size_bytes = (KRNL_file_size_bytes + PIPELINE_DEPTH);  //the pipeline depth of FPGA 64*8=512 + 64 = 576
+                        KRNL_file_size_bytes = KRNL_file_size_bytes/64;
+
+                        if(((i-2)%2) == 0)
+                        {
+                            //Set Arg
+                                kernelDD.setArg(0, buffer_in_HBM[0]);
+                                kernelDD.setArg(1, buffer_out_HBM[0]);
+                                kernelDD.setArg(2, buffer_out_HBM[2]);
+                                kernelDD.setArg(3, buffer_out_HBM[4]);
+                                kernelDD.setArg(4, buffer_out_HBM[6]);
+                                kernelDD.setArg(5, buffer_out_HBM[8]);
+                                kernelDD.setArg(6, sizeof(wait_count), &wait_count);
+                                kernelDD.setArg(7, sizeof(KRNL_file_size_bytes), &KRNL_file_size_bytes);
+                            //Kernel Call
+                                // std::cout << "COMP_E" << std::endl;
+                        }
+                        else
+                        {
+                            //Set Arg
+                                kernelDD.setArg(0, buffer_in_HBM[1]);
+                                kernelDD.setArg(1, buffer_out_HBM[1]);
+                                kernelDD.setArg(2, buffer_out_HBM[3]);
+                                kernelDD.setArg(3, buffer_out_HBM[5]);
+                                kernelDD.setArg(4, buffer_out_HBM[7]);
+                                kernelDD.setArg(5, buffer_out_HBM[9]);
+                                kernelDD.setArg(6, sizeof(wait_count), &wait_count);
+                                kernelDD.setArg(7, sizeof(KRNL_file_size_bytes), &KRNL_file_size_bytes);
+                            //Kernel Call
+                                // std::cout << "COMP_O" << std::endl;
+                        }
+                        CL_CHECK(cmd_.enqueueTask(kernelDD, nullptr, &Comp_events[i-2]));
+                        // std::cout << "COMP" << ":" << i-2 << std::endl;
                     }
-                    // std::cout << "C2F" << std::endl;
+
+                    //FPGA_2_CPU
+                    if((i >= 3) && (i < (stripeCount+3)))
+                    {
+                        if(((i-3)%2) == 0)
+                        {
+                            CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[0])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                                                            nullptr, &F2C_events[((i-3)*10)+0]));
+                            CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[2])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                                                            nullptr, &F2C_events[((i-3)*10)+1]));
+                            CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[4])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                                                            nullptr, &F2C_events[((i-3)*10)+2]));
+                            CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[6])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                                                            nullptr, &F2C_events[((i-3)*10)+3]));
+                            // cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[8])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                            //                                 nullptr, &F2C_events[((i-3)*10)+4]);
+                            // std::cout << "F2C_E" << std::endl;
+                        }
+                        else
+                        {
+                            CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[1])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                                                            nullptr, &F2C_events[((i-3)*10)+5]));
+                            CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[3])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                                                            nullptr, &F2C_events[((i-3)*10)+6]));
+                            CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[5])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                                                            nullptr, &F2C_events[((i-3)*10)+7]));
+                            CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[7])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                                                            nullptr, &F2C_events[((i-3)*10)+8]));
+                            // cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[9])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                            //                                 nullptr, &F2C_events[((i-3)*10)+9]);
+                            // std::cout << "F2C_O" << std::endl;
+                        }
+
+                        // std::cout << "F2C" << ":" << i-3 << std::endl;
+                    }
+                    asyncTimeE = std::chrono::steady_clock::now();
+                    asyncTime = std::chrono::duration_cast<std::chrono::microseconds>(asyncTimeE - asyncTimeS);
+                    time_async[i] = static_cast<double>(asyncTime.count());
+
+                    ///WAITS///
+                    
+                    //IO READ
+                    readTimeS = std::chrono::steady_clock::now();
+                    if(i < stripeCount)
+                    {
+                        int ret = 0;
+                        if(i%2 == 0)
+                        {
+                            while( aio_error(&aio_rf) == EINPROGRESS ) {;}
+                            ret = aio_return (&aio_rf);
+                            if(ret <= 0)
+                            {
+                                std::cerr << "Read Error. Bytes Read: " << ret << std::endl;
+                            }
+                            readTimeE = std::chrono::steady_clock::now();
+                            wrTimeS = std::chrono::steady_clock::now();
+                            writeZeros(data_in_HBM[0], Data_lengths[i], PIPELINE_DEPTH);
+                        }
+                        else
+                        {
+                            while( aio_error(&aio_rf1) == EINPROGRESS ) {;}
+                            ret = aio_return (&aio_rf1);
+                            if(ret <= 0)
+                            {
+                                std::cerr << "Read Error. Bytes Read: " << ret << std::endl;
+                            }
+                            readTimeE = std::chrono::steady_clock::now();
+                            wrTimeS = std::chrono::steady_clock::now();
+                            writeZeros(data_in_HBM[1], Data_lengths[i], PIPELINE_DEPTH);
+                        }
+                        // std::cout << "Read Bytes: " << ret << std::endl;
+                    }   
+                    // readTimeE = std::chrono::steady_clock::now();
+                    wrTimeE = std::chrono::steady_clock::now();
+                    wrTime = std::chrono::duration_cast<std::chrono::microseconds>(wrTimeE - wrTimeS);
+                    readTime = std::chrono::duration_cast<std::chrono::microseconds>(readTimeE - readTimeS);
+                    time_read[i] = static_cast<double>(readTime.count());
+                    time_wr[i] = static_cast<double>(wrTime.count());
+
+                    FPGATimeS = std::chrono::steady_clock::now();
+                    //CPU_2_FPGA
+                    if((i >= 1) && (i < (stripeCount+1)))
+                    {
+                        CL_CHECK(clWaitForEvents(one,(cl_event*)(&C2F_events[i-1])));
+                        // std::cout << "C2F Wait" << ":" << i-1 << std::endl;
+                    }                    
+                    
+                    //KERNEL CALL
+                    if((i >= 2) && (i < (stripeCount+2)))
+                    {
+                        CL_CHECK(clWaitForEvents(one,(cl_event*)(&Comp_events[i-2])));
+                        // std::cout << "COMP Wait" <<":" << i-2 << std::endl;
+                    }
+
+                    //FPGA_2_CPU
+                    if((i >= 3) && (i < (stripeCount+3)))
+                    {
+                        if(((i-3)%2) == 0)
+                        {
+                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+0])));
+                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+1])));
+                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+2])));
+                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+3])));
+                            // clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+4]));
+                        }
+                        else
+                        {
+                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+5])));
+                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+6])));
+                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+7])));
+                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+8])));
+                            // clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+9]));
+                        }
+                        // std::cout << "F2C Wait" << ":" << i-3 << std::endl;
+                    }
+                    FPGATimeE = std::chrono::steady_clock::now();
+                    FPGATime = std::chrono::duration_cast<std::chrono::microseconds>(FPGATimeE - FPGATimeS);
+                    time_fpga[i] = static_cast<double>(FPGATime.count());
+
+                    //Data Verification
+                    // if((i >= 3) && (i < (stripeCount+3)))
+                    // {
+                    //     if(((i-3)%2) == 0)
+                    //     {
+                    //         verif_all(reinterpret_cast<uint8_t*>(data_out_HBM[0]), 
+                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[2]), 
+                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[4]), 
+                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[6]), 
+                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[8]));
+                    //     }
+                    //     else
+                    //     {
+                    //         verif_all(reinterpret_cast<uint8_t*>(data_out_HBM[1]), 
+                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[3]), 
+                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[5]), 
+                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[7]), 
+                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[9]));
+                    //     }
+                    // }
                 }
-                // tempTimeB = std::chrono::steady_clock::now();
-                // tempTime = std::chrono::duration_cast<std::chrono::microseconds>(tempTimeB - tempTimeA);
-                // std::cout << "time_async C2F: " << static_cast<double>(tempTime.count()) <<std::endl;
-
-                //KERNEL CALL
-                if((i >= 2) && (i < (stripeCount+2)))
+            }
+            else
+            {
+                std::cout << "***Sequential Implementation***" << std::endl;
+                dfstart = std::chrono::steady_clock::now();
+                for (int i = 0; i < stripeCount; i++)
                 {
-                    KRNL_file_size_bytes = Data_lengths[i-2];
+                    std::cout << "ITER COUNT: " << i << std::endl;
+                    //IO READ
+                    memset(data_in_HBM[0], 0, max_input_size);
+                    async_readnorm(&aio_rf, (void *)(data_in_HBM[0]), nvmeFd, Data_lengths[i], Data_offsets[i]);  
+                    while( aio_error(&aio_rf) == EINPROGRESS ) {;}
+                    int ret = aio_return (&aio_rf);
+                    if(ret <= 0)
+                    {
+                        std::cerr << "Read Error. Bytes Read: " << ret << std::endl;
+                    }
+
+                    //CPU_2_FPGA
+                    int Ssize = Data_lengths[i]+PIPELINE_DEPTH+64;
+                    CL_CHECK(cmd_.enqueueWriteBuffer(buffer_in_HBM[0], CL_FALSE, 0, Ssize, data_in_HBM[0], nullptr, &C2F_events[i]));
+                    CL_CHECK(clWaitForEvents(one,(cl_event*)(&C2F_events[i])));
+
+                    //KERNEL CALL
+                    KRNL_file_size_bytes = Data_lengths[i];
                     file_size_rem = KRNL_file_size_bytes%64;
                     if(file_size_rem!=0)
                     {
@@ -542,181 +762,54 @@ int main(int argc, char* argv[]) {
                     }
                     KRNL_file_size_bytes = (KRNL_file_size_bytes + PIPELINE_DEPTH);  //the pipeline depth of FPGA 64*8=512 + 64 = 576
                     KRNL_file_size_bytes = KRNL_file_size_bytes/64;
+                    kernelDD.setArg(0, buffer_in_HBM[0]);
+                    kernelDD.setArg(1, buffer_out_HBM[0]);
+                    kernelDD.setArg(2, buffer_out_HBM[2]);
+                    kernelDD.setArg(3, buffer_out_HBM[4]);
+                    kernelDD.setArg(4, buffer_out_HBM[6]);
+                    kernelDD.setArg(5, buffer_out_HBM[8]);
+                    kernelDD.setArg(6, sizeof(wait_count), &wait_count);
+                    kernelDD.setArg(7, sizeof(KRNL_file_size_bytes), &KRNL_file_size_bytes);
+                    CL_CHECK(cmd_.enqueueTask(kernelDD, nullptr, &Comp_events[i]));
+                    CL_CHECK(clWaitForEvents(one,(cl_event*)(&Comp_events[i])));
 
-                    if(((i-2)%2) == 0)
-                    {
-                        //Set Arg
-                            kernelDD.setArg(0, buffer_in_HBM[0]);
-                            kernelDD.setArg(1, buffer_out_HBM[0]);
-                            kernelDD.setArg(2, buffer_out_HBM[2]);
-                            kernelDD.setArg(3, buffer_out_HBM[4]);
-                            kernelDD.setArg(4, buffer_out_HBM[6]);
-                            kernelDD.setArg(5, buffer_out_HBM[8]);
-                            kernelDD.setArg(7, sizeof(KRNL_file_size_bytes), &KRNL_file_size_bytes);
-                        //Kernel Call
-                            cmd_.enqueueTask(kernelDD, nullptr, &Comp_events[i-2]);
-                            // std::cout << "COMP_E" << std::endl;
-                    }
-                    else
-                    {
-                        //Set Arg
-                            kernelDD.setArg(0, buffer_in_HBM[1]);
-                            kernelDD.setArg(1, buffer_out_HBM[1]);
-                            kernelDD.setArg(2, buffer_out_HBM[3]);
-                            kernelDD.setArg(3, buffer_out_HBM[5]);
-                            kernelDD.setArg(4, buffer_out_HBM[7]);
-                            kernelDD.setArg(5, buffer_out_HBM[9]);
-                            kernelDD.setArg(7, sizeof(KRNL_file_size_bytes), &KRNL_file_size_bytes);
-                        //Kernel Call
-                            cmd_.enqueueTask(kernelDD, nullptr, &Comp_events[i-2]);
-                            // std::cout << "COMP_O" << std::endl;
-                    }
 
-                    // std::cout << "COMP" << std::endl;
-                    
+                    //FPGA_2_CPU
+                    CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[0])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                                                    nullptr, &F2C_events[((i)*10)+0]));
+                    CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[2])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                                                    nullptr, &F2C_events[((i)*10)+1]));
+                    CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[4])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                                                    nullptr, &F2C_events[((i)*10)+2]));
+                    CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[6])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                                                    nullptr, &F2C_events[((i)*10)+3]));
+
+                    CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i)*10)+0])));
+                    CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i)*10)+1])));
+                    CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i)*10)+2])));
+                    CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i)*10)+3])));
+
+                    //Data Verification
+                    // if((i >= 3) && (i < (stripeCount+3)))
+                    // {
+                    //     if(((i-3)%2) == 0)
+                    //     {
+                    //         verif_all(reinterpret_cast<uint8_t*>(data_out_HBM[0]), 
+                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[2]), 
+                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[4]), 
+                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[6]), 
+                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[8]));
+                    //     }
+                    //     else
+                    //     {
+                    //         verif_all(reinterpret_cast<uint8_t*>(data_out_HBM[1]), 
+                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[3]), 
+                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[5]), 
+                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[7]), 
+                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[9]));
+                    //     }
+                    // }
                 }
-
-                //FPGA_2_CPU
-                if((i >= 3) && (i < (stripeCount+3)))
-                {
-                    if(((i-3)%2) == 0)
-                    {
-                        cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[0])}, CL_MIGRATE_MEM_OBJECT_HOST , 
-                                                        nullptr, &F2C_events[((i-3)*10)+0]);
-                        cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[2])}, CL_MIGRATE_MEM_OBJECT_HOST , 
-                                                        nullptr, &F2C_events[((i-3)*10)+1]);
-                        cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[4])}, CL_MIGRATE_MEM_OBJECT_HOST , 
-                                                        nullptr, &F2C_events[((i-3)*10)+2]);
-                        cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[6])}, CL_MIGRATE_MEM_OBJECT_HOST , 
-                                                        nullptr, &F2C_events[((i-3)*10)+3]);
-                        // cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[8])}, CL_MIGRATE_MEM_OBJECT_HOST , 
-                        //                                 nullptr, &F2C_events[((i-3)*10)+4]);
-                        // std::cout << "F2C_E" << std::endl;
-                    }
-                    else
-                    {
-                        cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[1])}, CL_MIGRATE_MEM_OBJECT_HOST , 
-                                                        nullptr, &F2C_events[((i-3)*10)+5]);
-                        cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[3])}, CL_MIGRATE_MEM_OBJECT_HOST , 
-                                                        nullptr, &F2C_events[((i-3)*10)+6]);
-                        cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[5])}, CL_MIGRATE_MEM_OBJECT_HOST , 
-                                                        nullptr, &F2C_events[((i-3)*10)+7]);
-                        cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[7])}, CL_MIGRATE_MEM_OBJECT_HOST , 
-                                                        nullptr, &F2C_events[((i-3)*10)+8]);
-                        // cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[9])}, CL_MIGRATE_MEM_OBJECT_HOST , 
-                        //                                 nullptr, &F2C_events[((i-3)*10)+9]);
-                        // std::cout << "F2C_O" << std::endl;
-                    }
-
-                    // std::cout << "F2C" << std::endl;
-                }
-                asyncTimeE = std::chrono::steady_clock::now();
-                asyncTime = std::chrono::duration_cast<std::chrono::microseconds>(asyncTimeE - asyncTimeS);
-                time_async[i] = static_cast<double>(asyncTime.count());
-
-                ///WAITS///
-
-                C2FTimeS = std::chrono::steady_clock::now();
-                //CPU_2_FPGA
-                if((i >= 1) && (i < (stripeCount+1)))
-                {
-                    clWaitForEvents(one,(cl_event*)(&C2F_events[i-1]));
-                    if(((i-1)%2) == 0)
-                    {
-                        memset(data_in_HBM[0], 0, max_input_size);
-                    }
-                    else
-                    {
-                        memset(data_in_HBM[1], 0, max_input_size);
-                    }
-                    // std::cout << "C2F Wait" << std::endl;
-                }
-                C2FTimeE = std::chrono::steady_clock::now();
-                C2FTime = std::chrono::duration_cast<std::chrono::microseconds>(C2FTimeE - C2FTimeS);
-                time_c2f[i] = static_cast<double>(C2FTime.count());
-
-                readTimeS = std::chrono::steady_clock::now();
-                //IO READ
-                if(i < stripeCount)
-                {
-                    if(i%2 == 0)
-                    {
-                        while( aio_error(&aio_rf) == EINPROGRESS ) {;}
-                        int ret = aio_return (&aio_rf);
-                        if(ret <= 0)
-                        {
-                            std::cerr << "Read Error. Bytes Read: " << ret << std::endl;
-                        }
-                    }
-                    else
-                    {
-                        while( aio_error(&aio_rf1) == EINPROGRESS ) {;}
-                        int ret = aio_return (&aio_rf1);
-                        if(ret <= 0)
-                        {
-                            std::cerr << "Read Error. Bytes Read: " << ret << std::endl;
-                        }
-                    }
-                }   
-                readTimeE = std::chrono::steady_clock::now();
-                readTime = std::chrono::duration_cast<std::chrono::microseconds>(readTimeE - readTimeS);
-                time_read[i] = static_cast<double>(readTime.count());
-
-
-                
-                FPGATimeS = std::chrono::steady_clock::now();
-                //KERNEL CALL
-                if((i >= 2) && (i < (stripeCount+2)))
-                {
-                    clWaitForEvents(one,(cl_event*)(&Comp_events[i-2]));
-                    // std::cout << "COMP Wait" << std::endl;
-                }
-
-                //FPGA_2_CPU
-                if((i >= 3) && (i < (stripeCount+3)))
-                {
-                    if(((i-3)%2) == 0)
-                    {
-                        clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+0]));
-                        clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+1]));
-                        clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+2]));
-                        clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+3]));
-                        // clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+4]));
-                    }
-                    else
-                    {
-                        clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+5]));
-                        clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+6]));
-                        clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+7]));
-                        clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+8]));
-                        // clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+9]));
-                    }
-                    // std::cout << "F2C Wait" << std::endl;
-                }
-                FPGATimeE = std::chrono::steady_clock::now();
-                FPGATime = std::chrono::duration_cast<std::chrono::microseconds>(FPGATimeE - FPGATimeS);
-                time_fpga[i] = static_cast<double>(FPGATime.count());
-
-                //Data Verification
-                // if((i >= 3) && (i < (stripeCount+3)))
-                // {
-                //     if(((i-3)%2) == 0)
-                //     {
-                //         verif_all(reinterpret_cast<uint8_t*>(data_out_HBM[0]), 
-                //                 reinterpret_cast<uint8_t*>(data_out_HBM[2]), 
-                //                 reinterpret_cast<uint8_t*>(data_out_HBM[4]), 
-                //                 reinterpret_cast<uint8_t*>(data_out_HBM[6]), 
-                //                 reinterpret_cast<uint8_t*>(data_out_HBM[8]));
-                //     }
-                //     else
-                //     {
-                //         verif_all(reinterpret_cast<uint8_t*>(data_out_HBM[1]), 
-                //                 reinterpret_cast<uint8_t*>(data_out_HBM[3]), 
-                //                 reinterpret_cast<uint8_t*>(data_out_HBM[5]), 
-                //                 reinterpret_cast<uint8_t*>(data_out_HBM[7]), 
-                //                 reinterpret_cast<uint8_t*>(data_out_HBM[9]));
-                //     }
-                // }
             }
             auto dfend = std::chrono::steady_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(dfend - dfstart);
@@ -733,7 +826,7 @@ int main(int argc, char* argv[]) {
             float total_read = 0.0;
             
             #ifdef PRINT_DEBUG
-                if(NITERS < 20)
+                if(dataflow && (NITERS < 20))
                 {
                     for (int s = 0; s < NITERS; s++)
                     {
@@ -742,8 +835,11 @@ int main(int argc, char* argv[]) {
                         total_read += time_fpga[s];
                         
                         std::cout << std::dec << "Total Async Call[" <<s<< "] Time (us): " << time_async[s] << std::endl;
-                        std::cout << std::dec << "Total C2F[" <<s<< "] Time (us): " << time_c2f[s] << std::endl;
-                        std::cout << std::dec << "Total Read[" <<s<< "] Time (us): " << time_read[s] << std::endl;
+                        if(s < stripeCount)
+                        {
+                            std::cout << std::dec << "Total Read[" <<s<< "] Time (us): " << time_read[s] << std::endl;
+                            std::cout << std::dec << "Total Write0s[" <<s<< "] Time (us): " << time_wr[s] << std::endl;
+                        }
                         std::cout << std::dec << "Total FPGA[" <<s<< "] Time (us): " << time_fpga[s] << std::endl;
                     }
                     std::cout << std::dec << "Total Read Sum(us): " << total_read << std::endl;

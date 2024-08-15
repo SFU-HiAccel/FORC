@@ -67,6 +67,7 @@ const uint32_t BUFFERS_OUT = 10;
 const uint32_t ALIGNED_BYTES = 4096;
 // const std::string TARGET_DEVICE_NAME = "xilinx_u280_xdma_201920_3";
 
+bool dataflow = true;
 const uint32_t RSIZE_DIV = 16;   //for SR it should be 4 else 16
 const uint32_t PIPELINE_DEPTH = 576;
 uint32_t nrows = 0;
