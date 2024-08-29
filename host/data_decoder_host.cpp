@@ -25,6 +25,14 @@ void async_readnorm(struct aiocb* aio_rf, void* data_in, int Fd, int vector_size
     }
 }
 
+void copy_data(unsigned char* src, unsigned char* dest, size_t size, size_t offset) {
+    // unsigned char* src_ptr = src + offset;
+    unsigned char* dest_ptr = dest + offset;
+    for (size_t i = 0; i < size; ++i) {
+        dest_ptr[i] = src[i];
+    }
+}
+
 void writeZeros(void* ptr, uint32_t offset, uint32_t size) {
     // Calculate the address with the offset
     void* target = static_cast<char*>(ptr) + offset;
@@ -33,9 +41,83 @@ void writeZeros(void* ptr, uint32_t offset, uint32_t size) {
     memset(target, 0, size);
 }
 
-int verif_all(int32_t *datain0, int32_t *datain1, int32_t *datain2, int32_t *datain3, int32_t *track);
+void print_data(uint8_t* data0, uint8_t* data1, uint8_t* data2, uint8_t* data3, uint32_t stripe_rows, uint32_t offset) {
+    // Read the total number of rows
+    int tRows = stripe_rows;
+    
+    int numbers_to_print = 16; // Number of 32-bit numbers to print from each pointer
 
-void update_patch_data(int32_t *datain0, int32_t *datain1, int32_t *datain2, int32_t *datain3, int32_t *track);
+    // Array of pointers for easier access in the loop, with offset added
+    uint8_t* data_out_HBM[4] = {
+        data0 + offset,
+        data1 + offset,
+        data2 + offset,
+        data3 + offset
+    };
+
+    // Start printing numbers from the pointers in sequence until tRows
+    for (int row = 0, cRow = 0; cRow < tRows; cRow += (64)) {
+        for (int i = 0; i < 4; ++i) {  // Loop through the four data pointers
+            for (int j = 0; j < numbers_to_print; ++j) {  // Print 16 numbers from each pointer
+                int index = row + j;
+                if (index < tRows) {
+                    // Read 32-bit (4 bytes) numbers
+                    uint32_t number = *reinterpret_cast<uint32_t*>(data_out_HBM[i] + index * 4);
+                    std::cout << "Data[" << i << "][" << index << "] = " << number << std::endl;
+                }
+            }
+        }
+        row += numbers_to_print;
+    }
+}
+
+void print_Fdata(uint8_t* data0, uint8_t* data1, uint8_t* data2, uint8_t* data3, uint32_t *stripe_rows, uint32_t stripeCount) {
+    std::ofstream outFile("output.txt");  // Create and open the output file
+    
+    if (!outFile.is_open()) {
+        std::cerr << "Failed to open the file!" << std::endl;
+        return;
+    }
+    
+    uint32_t stCount = 0;
+    int offset = 0;
+    while (stCount < stripeCount) {
+        // Read the total number of rows
+        int tRows = stripe_rows[stCount];
+        // offset = (stCount == 0) ? 0 : stripe_rows[stCount - 1];
+        
+        // Array of pointers for easier access in the loop, with offset added
+        uint8_t* data_out_HBM[4] = {
+            data0 + offset,
+            data1 + offset,
+            data2 + offset,
+            data3 + offset
+        };
+
+        // Start writing numbers from the pointers in sequence until tRows
+        for (int row = 0, cRow = 0; cRow < tRows; cRow += (64)) {
+            for (int i = 0; i < 4; ++i) {  // Loop through the four data pointers
+                for (int j = 0; j < 16; ++j) {  // Write 16 numbers from each pointer
+                    int index = row + j;
+                    if (index < tRows) {
+                        // Read 32-bit (4 bytes) numbers
+                        uint32_t number = *reinterpret_cast<uint32_t*>(data_out_HBM[i] + index * 4);
+                        outFile << number << std::endl;
+                    }
+                }
+            }
+            row += 16;
+        }
+        stCount++;
+    }
+    
+    outFile.close();  // Close the file when done
+}
+
+
+int verif_all(int32_t *datain0, int32_t *datain1, int32_t *datain2, int32_t *datain3, int32_t *track, uint32_t nrows, uint32_t *stripe_rows);
+
+void update_patch_data(int32_t *datain0, int32_t *datain1, int32_t *datain2, int32_t *datain3, int32_t *track, uint32_t nrows);
 
 int main(int argc, char* argv[]) {
     gflags::ParseCommandLineFlags(&argc, &argv, /*remove_flags=*/true);
@@ -44,7 +126,7 @@ int main(int argc, char* argv[]) {
     uint32_t KRNL_file_size_bytes = 0;
     std::vector<uint32_t> Data_offsets;
     std::vector<uint32_t> Data_lengths;
-    std::vector<uint64_t> stripe_rows;  // Array to store the number of rows in each stripe
+    std::vector<uint32_t> stripe_rows;  // Array to store the number of rows in each stripe
     uint32_t Data_offset = 0;
     uint32_t KRNL_Data_Write = 0;
     uint32_t wait_count = 32;  //max FIFO depth for hardware and try 2147483 for csim
@@ -61,9 +143,9 @@ int main(int argc, char* argv[]) {
 
     nvme_file = orc_file;
     
-    uint64_t numberColumns = reader->getType().getMaximumColumnId() + 1;
-    uint64_t nrows = reader->getNumberOfRows();
-    uint64_t stripeCount = reader->getNumberOfStripes();
+    uint32_t numberColumns = reader->getType().getMaximumColumnId() + 1;
+    uint32_t nrows = reader->getNumberOfRows();
+    uint32_t stripeCount = reader->getNumberOfStripes();
 
     #ifdef PRINT_DEBUG
         std::cout << "{ \"name\": \"" << orc_file << "\",\n";
@@ -77,7 +159,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    for (uint64_t col = 0; col < numberColumns; ++col) {
+    for (uint32_t col = 0; col < numberColumns; ++col) {
         orc::ColumnEncodingKind encoding = reader->getStripe(0)->getColumnEncoding(col);
         #ifdef PRINT_DEBUG
             std::cout << "         { \"column\": " << col << ", \"encoding\": \""
@@ -91,12 +173,12 @@ int main(int argc, char* argv[]) {
         #endif
     }
 
-    for (uint64_t str = 0; str < stripeCount; ++str) {
+    for (uint32_t str = 0; str < stripeCount; ++str) {
         auto stripe = reader->getStripe(str);
         stripe_rows.push_back(stripe->getNumberOfRows());  // Populate the stripe_rows array
         // std::cout << "Stripe " << str << " has " << stripe->getNumberOfRows() << " rows.\n";  // Print the number of rows in each stripe
 
-        for (uint64_t streamIdx = 0; streamIdx < stripe->getNumberOfStreams(); ++streamIdx) {
+        for (uint32_t streamIdx = 0; streamIdx < stripe->getNumberOfStreams(); ++streamIdx) {
             std::unique_ptr<orc::StreamInformation> stream = stripe->getStreamInformation(streamIdx);
             #ifdef PRINT_DEBUG
                 if (streamIdx != 0) {
@@ -133,13 +215,30 @@ int main(int argc, char* argv[]) {
     std::cout << "Maximum number of rows in any stripe: " << max_stripe_rows << std::endl;
     std::cout << "Maximum data length: " << max_data_length << std::endl;
     std::cout << "Total data length: " << total_data_length << std::endl;
+    std::cout << "Total rows: " << nrows << std::endl;
 
     uint8_t* data_in_HBM[BUFFERS_IN]; 
     uint8_t* data_out_HBM[BUFFERS_OUT];
+
+    uint8_t* dataOut[4]; 
+    uint8_t* trackOut;
     
     uint32_t max_input_size = max_data_length+PIPELINE_DEPTH+64;
     uint32_t max_output_size = max_stripe_rows; //MAX OUTPUT SIZE BYTES = (max_stripe_rows*4) , div 4 as data is divided in 4 ports 
-    uint32_t max_track_size = max_stripe_rows*2; //max it can be 2x of the one data port size
+    uint32_t max_track_size = max_stripe_rows*1; //max it can be 2x of the one data port size
+
+    uint32_t trackRem = max_track_size%16;
+    if(trackRem != 0)       //128bit is 16bytes
+    {
+        max_track_size += (16 - trackRem);
+    }
+
+    uint32_t total_track_size = nrows*1; 
+    trackRem = total_track_size%16;
+    if(trackRem != 0)       //128bit is 16bytes
+    {
+        total_track_size += (16 - trackRem);
+    }
 
     //Declare 256MB each
     //in ports
@@ -155,6 +254,15 @@ int main(int argc, char* argv[]) {
     for (int i = 8; i < BUFFERS_OUT; ++i) {
         data_out_HBM[i] = reinterpret_cast<uint8_t*>(aligned_alloc(ALIGNED_BYTES, max_track_size));
     }
+
+    //Data ports for complete data
+    //out ports
+    for (int i = 0; i < 4; ++i) {
+        dataOut[i] = reinterpret_cast<uint8_t*>(aligned_alloc(ALIGNED_BYTES, nrows));
+    }
+    //track port
+    trackOut = reinterpret_cast<uint8_t*>(aligned_alloc(ALIGNED_BYTES, total_track_size));
+
 
    ///////Opening SSD////////
     auto FileTimeS = std::chrono::steady_clock::now();
@@ -461,9 +569,9 @@ int main(int argc, char* argv[]) {
         #endif
         ///////Launching KERNEL DATAFLOW////////
             //non multiple RL adjustment
-            // stripeCount -= 1;    //remove last stripe
+            stripeCount -= 9;    //remove stripes
 
-            uint32_t NITERS = stripeCount + 3;  //IO, C2F, FCOMP, F2C
+            uint32_t NITERS = stripeCount + 4;  //IO, C2F, FCOMP, F2C, dCopy
 
             cl_uint one = 1;
             std::vector<cl::Event> C2F_events(NITERS);
@@ -484,6 +592,10 @@ int main(int argc, char* argv[]) {
             auto FPGATimeE = std::chrono::steady_clock::now();
             auto FPGATime = std::chrono::duration_cast<std::chrono::microseconds>(asyncTimeE - asyncTimeS);
 
+            auto dCopyTimeS = std::chrono::steady_clock::now();
+            auto dCopyTimeE = std::chrono::steady_clock::now();
+            auto dCopyTime = std::chrono::duration_cast<std::chrono::microseconds>(asyncTimeE - asyncTimeS);
+
             auto wrTimeS = std::chrono::steady_clock::now();
             auto wrTimeE = std::chrono::steady_clock::now();
             auto wrTime = std::chrono::duration_cast<std::chrono::microseconds>(asyncTimeE - asyncTimeS);
@@ -492,6 +604,7 @@ int main(int argc, char* argv[]) {
             auto tempTimeB = std::chrono::steady_clock::now();
             auto tempTime = std::chrono::duration_cast<std::chrono::microseconds>(tempTimeA - tempTimeB);
 
+            double time_dCopy[NITERS] = {0.0F};
             double time_fpga[NITERS] = {0.0F};
             double time_read[NITERS] = {0.0F};
             double time_wr[NITERS] = {0.0F};
@@ -499,6 +612,7 @@ int main(int argc, char* argv[]) {
             // async_readnorm(void* data_in, int nvmeFd, int vector_size_bytes, int offset)
             // std::cout << "Starting DF, Total Iters: " << NITERS << std::endl;
             // std::cout << "stripeCount: " << stripeCount << std::endl;
+            std::thread t1, t2, t3, t4, t5; // Declare threads outside the if block
 
             auto dfstart = std::chrono::steady_clock::now();
             if(dataflow)
@@ -604,8 +718,8 @@ int main(int argc, char* argv[]) {
                                                             nullptr, &F2C_events[((i-3)*10)+2]));
                             CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[6])}, CL_MIGRATE_MEM_OBJECT_HOST , 
                                                             nullptr, &F2C_events[((i-3)*10)+3]));
-                            // cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[8])}, CL_MIGRATE_MEM_OBJECT_HOST , 
-                            //                                 nullptr, &F2C_events[((i-3)*10)+4]);
+                            CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[8])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                                                            nullptr, &F2C_events[((i-3)*10)+4]));
                             // std::cout << "F2C_E" << std::endl;
                         }
                         else
@@ -618,12 +732,48 @@ int main(int argc, char* argv[]) {
                                                             nullptr, &F2C_events[((i-3)*10)+7]));
                             CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[7])}, CL_MIGRATE_MEM_OBJECT_HOST , 
                                                             nullptr, &F2C_events[((i-3)*10)+8]));
-                            // cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[9])}, CL_MIGRATE_MEM_OBJECT_HOST , 
-                            //                                 nullptr, &F2C_events[((i-3)*10)+9]);
+                            CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[9])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                                                            nullptr, &F2C_events[((i-3)*10)+9]));
                             // std::cout << "F2C_O" << std::endl;
                         }
 
                         // std::cout << "F2C" << ":" << i-3 << std::endl;
+                    }
+
+                    //Data Copy Calls
+                    if((i >= 4) && (i < (stripeCount+4)))
+                    {
+                        uint32_t dRow = stripe_rows[i-4];
+                        uint32_t tTrack = (uint32_t)((float)(dRow) * 1.17);
+                        uint32_t offsetD = 0;
+                        uint32_t offsetT = 0;
+                        
+                        if(i == 4)
+                        {
+                            offsetD = 0;
+                            offsetT = 0;
+                        }
+                        else
+                        {
+                            offsetD = dRow;
+                            offsetT = tTrack;
+                        }
+
+                        if (((i - 4) % 2) == 0) {
+                            // Launch threads with offset handling
+                            t1 = std::thread(copy_data, data_out_HBM[0], dataOut[0], dRow, offsetD);
+                            t2 = std::thread(copy_data, data_out_HBM[2], dataOut[1], dRow, offsetD);
+                            t3 = std::thread(copy_data, data_out_HBM[4], dataOut[2], dRow, offsetD);
+                            t4 = std::thread(copy_data, data_out_HBM[6], dataOut[3], dRow, offsetD);
+                            t5 = std::thread(copy_data, data_out_HBM[8], trackOut, tTrack, offsetT);
+                        } else {
+                            // Launch threads with offset handling
+                            t1 = std::thread(copy_data, data_out_HBM[1], dataOut[0], dRow, offsetD);
+                            t2 = std::thread(copy_data, data_out_HBM[3], dataOut[1], dRow, offsetD);
+                            t3 = std::thread(copy_data, data_out_HBM[5], dataOut[2], dRow, offsetD);
+                            t4 = std::thread(copy_data, data_out_HBM[7], dataOut[3], dRow, offsetD);
+                            t5 = std::thread(copy_data, data_out_HBM[9], trackOut, tTrack, offsetT);
+                        }
                     }
                     asyncTimeE = std::chrono::steady_clock::now();
                     asyncTime = std::chrono::duration_cast<std::chrono::microseconds>(asyncTimeE - asyncTimeS);
@@ -693,7 +843,7 @@ int main(int argc, char* argv[]) {
                             CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+1])));
                             CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+2])));
                             CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+3])));
-                            // clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+4]));
+                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+4])));
                         }
                         else
                         {
@@ -701,7 +851,7 @@ int main(int argc, char* argv[]) {
                             CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+6])));
                             CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+7])));
                             CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+8])));
-                            // clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+9]));
+                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+9])));
                         }
                         // std::cout << "F2C Wait" << ":" << i-3 << std::endl;
                     }
@@ -709,26 +859,21 @@ int main(int argc, char* argv[]) {
                     FPGATime = std::chrono::duration_cast<std::chrono::microseconds>(FPGATimeE - FPGATimeS);
                     time_fpga[i] = static_cast<double>(FPGATime.count());
 
-                    //Data Verification
-                    // if((i >= 3) && (i < (stripeCount+3)))
-                    // {
-                    //     if(((i-3)%2) == 0)
-                    //     {
-                    //         verif_all(reinterpret_cast<uint8_t*>(data_out_HBM[0]), 
-                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[2]), 
-                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[4]), 
-                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[6]), 
-                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[8]));
-                    //     }
-                    //     else
-                    //     {
-                    //         verif_all(reinterpret_cast<uint8_t*>(data_out_HBM[1]), 
-                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[3]), 
-                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[5]), 
-                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[7]), 
-                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[9]));
-                    //     }
-                    // }
+
+                    //dataCopy
+                    dCopyTimeS = std::chrono::steady_clock::now();
+                    if((i >= 4) && (i < (stripeCount+4)))
+                    {
+                        // Wait for all threads to finish
+                        t1.join();
+                        t2.join();
+                        t3.join();
+                        t4.join();
+                        t5.join();
+                    }
+                    dCopyTimeE = std::chrono::steady_clock::now();
+                    dCopyTime = std::chrono::duration_cast<std::chrono::microseconds>(dCopyTimeE - dCopyTimeS);
+                    time_dCopy[i] = static_cast<double>(FPGATime.count());
                 }
             }
             else
@@ -783,32 +928,62 @@ int main(int argc, char* argv[]) {
                                                     nullptr, &F2C_events[((i)*10)+2]));
                     CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[6])}, CL_MIGRATE_MEM_OBJECT_HOST , 
                                                     nullptr, &F2C_events[((i)*10)+3]));
+                    CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[8])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                                                    nullptr, &F2C_events[((i)*10)+4]));
 
                     CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i)*10)+0])));
                     CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i)*10)+1])));
                     CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i)*10)+2])));
                     CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i)*10)+3])));
+                    CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i)*10)+4])));
 
-                    //Data Verification
-                    // if((i >= 3) && (i < (stripeCount+3)))
-                    // {
-                    //     if(((i-3)%2) == 0)
-                    //     {
-                    //         verif_all(reinterpret_cast<uint8_t*>(data_out_HBM[0]), 
-                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[2]), 
-                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[4]), 
-                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[6]), 
-                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[8]));
-                    //     }
-                    //     else
-                    //     {
-                    //         verif_all(reinterpret_cast<uint8_t*>(data_out_HBM[1]), 
-                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[3]), 
-                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[5]), 
-                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[7]), 
-                    //                 reinterpret_cast<uint8_t*>(data_out_HBM[9]));
-                    //     }
-                    // }
+                    //data Copy
+                    uint32_t dSize = stripe_rows[i];
+                    uint32_t tTrackSize = dSize *1;
+                    uint32_t tRem = tTrackSize%16;  //128bit is 16bytes
+                    if(tRem != 0)
+                    {
+                        tTrackSize += (16 - tRem);
+                    }
+                    std::cout << "dSize: " << dSize << std::endl;
+                    std::cout << "tTrackSize: " << tTrackSize << std::endl;
+                    uint32_t offsetD = 0;
+                    uint32_t offsetT = 0;
+                    
+                    if(i == 0)
+                    {
+                        offsetD = 0;
+                        offsetT = 0;
+                    }
+                    else
+                    {
+                        uint32_t dOffset = stripe_rows[i-1];
+                        uint32_t tOffset = dOffset * 1;
+                        tRem = tOffset%16;  //128bit is 16bytes
+                        if(tRem != 0)
+                        {
+                            tOffset += (16 - tRem);
+                        }
+                        offsetD = dOffset;
+                        offsetT = tOffset;
+                    }
+
+                    t1 = std::thread(copy_data, data_out_HBM[0], dataOut[0], dSize, offsetD);
+                    t2 = std::thread(copy_data, data_out_HBM[2], dataOut[1], dSize, offsetD);
+                    t3 = std::thread(copy_data, data_out_HBM[4], dataOut[2], dSize, offsetD);
+                    t4 = std::thread(copy_data, data_out_HBM[6], dataOut[3], dSize, offsetD);
+                    t5 = std::thread(copy_data, data_out_HBM[8], trackOut, tTrackSize, offsetT);
+
+                    t1.join();
+                    t2.join();
+                    t3.join();
+                    t4.join();
+                    t5.join();
+
+                    // print_data(data_out_HBM[0], data_out_HBM[2], data_out_HBM[4], data_out_HBM[6], dSize, 0);
+                    // print_data(dataOut[0], dataOut[1], dataOut[2], dataOut[3], dSize, offsetD);
+
+                    
                 }
             }
             auto dfend = std::chrono::steady_clock::now();
@@ -818,6 +993,19 @@ int main(int argc, char* argv[]) {
 
             (void)close(nvmeFd);
 
+            if(dataVerif)
+            {
+                //Data Verification
+                // verif_all(reinterpret_cast<int32_t*>(dataOut[0]), 
+                //         reinterpret_cast<int32_t*>(dataOut[1]), 
+                //         reinterpret_cast<int32_t*>(dataOut[2]), 
+                //         reinterpret_cast<int32_t*>(dataOut[3]), 
+                //         reinterpret_cast<int32_t*>(trackOut), 
+                //         nrows, 
+                //         stripe_rows.data());
+
+                print_Fdata(dataOut[0], dataOut[1], dataOut[2], dataOut[3], stripe_rows.data(), stripeCount);
+            }
 
             ////PROFILING RESULTS////
             std::cout << std::dec << "----CPU TIMER BASED CALCULATIONS----" << std::endl;
@@ -830,9 +1018,11 @@ int main(int argc, char* argv[]) {
                 {
                     for (int s = 0; s < NITERS; s++)
                     {
-                        total_read += time_async[s];
-                        total_read += time_read[s];
-                        total_read += time_fpga[s];
+                        // total_read += time_async[s];
+                        // total_read += time_read[s];
+                        // total_read += time_fpga[s];
+                        // total_read += time_fpga[s];
+                        // total_read += time_dCopy[s];
                         
                         std::cout << std::dec << "Total Async Call[" <<s<< "] Time (us): " << time_async[s] << std::endl;
                         if(s < stripeCount)
@@ -841,8 +1031,9 @@ int main(int argc, char* argv[]) {
                             std::cout << std::dec << "Total Write0s[" <<s<< "] Time (us): " << time_wr[s] << std::endl;
                         }
                         std::cout << std::dec << "Total FPGA[" <<s<< "] Time (us): " << time_fpga[s] << std::endl;
+                        std::cout << std::dec << "Total dCopy[" <<s<< "] Time (us): " << time_dCopy[s] << std::endl;
                     }
-                    std::cout << std::dec << "Total Read Sum(us): " << total_read << std::endl;
+                    // std::cout << std::dec << "Total Read Sum(us): " << total_read << std::endl;
                 }
             #endif
 
@@ -861,6 +1052,11 @@ int main(int argc, char* argv[]) {
             free(data_out_HBM[i]);
         }
 
+        for (int i = 0; i < 4; ++i) {
+            free(dataOut[i]);
+        }
+        free(trackOut);
+
         //////////////////////////
     }
     else
@@ -872,7 +1068,7 @@ int main(int argc, char* argv[]) {
     return 0;
 }
 
-int verif_all(int32_t *datain0, int32_t *datain1, int32_t *datain2, int32_t *datain3, int32_t *track)
+int verif_all(int32_t *datain0, int32_t *datain1, int32_t *datain2, int32_t *datain3, int32_t *track, uint32_t nrows, uint32_t *stripe_rows)
 {
     int64_t kernel_dout = 0;
     ap_int<AXI_WIDTH> buf_out0 = 0;
@@ -917,99 +1113,136 @@ int verif_all(int32_t *datain0, int32_t *datain1, int32_t *datain2, int32_t *dat
     uint16_t runLength = 0;
     uint8_t PLL = 0;
     int64_t number = 0;
+    uint32_t tRows = 0;
+    uint32_t stripeCount = 0;
+    uint32_t trCount = 0;
 
     while(n < nrows)
     {
-        j = 0;
-        batch = 0;
 
-        PLL = mTr->range(7,0);      //8
-        decType = mTr->range(71,64);  //8
-        runLength = mTr->range(95,80);    //16
-        // mTr++;
-
-        if(runLength != 0)
+        //metaData size read limit
+        uint32_t dRow = stripe_rows[stripeCount];
+        tRows += dRow;
+        uint32_t trackSize = dRow*1;
+        uint32_t tRem = trackSize%16;
+        if(tRem!=0)
         {
-            if(PLL!=0)
+            trackSize += (16-tRem);
+        }
+        trackSize = trackSize/16;       //total track count for mTr array
+
+        std::cout << "dRow: " << dRow << std::endl;
+        std::cout << "trackSize: " << trackSize << std::endl;
+
+        while(trCount < trackSize)
+        {
+            j = 0;
+            batch = 0;
+
+            PLL = mTr->range(7,0);      //8
+            decType = mTr->range(71,64);  //8
+            runLength = mTr->range(95,80);    //16
+
+            // std::cout << "PLL: " << (uint16_t)(PLL) << std::endl;
+            // std::cout << "decType: " << (uint16_t)(decType) << std::endl;
+            // std::cout << "runLength: " << (uint16_t)(runLength) << std::endl;
+            // mTr++;
+
+            if((runLength != 0) && (n < tRows))
             {
-                mTr++;
-            }
-            else
-            {
-                if(runLength <= 64)
+                if(PLL!=0)
                 {
-                    tRun = runLength;
+                    mTr++;
+                    trCount++;
                 }
                 else
                 {
-                    tRun = 64;
-                }
-
-                while ((batch < tRun) && (n < nrows))
-                {
-                    std::getline(in_file, line);
-                    if(j == 0)
+                    if(runLength <= 64)
                     {
-                        buf_out0 = Data_Out0[d0_iter];       //Data_Out_Check
-                        buf_out1 = Data_Out1[d1_iter];       //Data_Out_Check
-                        buf_out2 = Data_Out2[d2_iter];       //Data_Out_Check
-                        buf_out3 = Data_Out3[d3_iter];       //Data_Out_Check
-
-                        d0_iter++;
-                        d1_iter++;
-                        d2_iter++;
-                        d3_iter++;
-                        mTr++;
-
-                        kernel_dout = buf_out0.range(31,0);
-                        buf_out0 = buf_out0 >> 32;
-                        ++j;
-
+                        tRun = runLength;
                     }
                     else
                     {
-                        if (j > 47) {
-                            kernel_dout = buf_out3.range(31, 0);
-                            buf_out3 = buf_out3 >> 32;
-                        } else if (j > 31) {
-                            kernel_dout = buf_out2.range(31, 0);
-                            buf_out2 = buf_out2 >> 32;
-                        }
-                        else if (j > 15) {
-                            kernel_dout = buf_out1.range(31, 0);
-                            buf_out1 = buf_out1 >> 32;
-                        }
-                        else {
-                            kernel_dout = buf_out0.range(31, 0);
-                            buf_out0 = buf_out0 >> 32;
-                        }
-                        j+=1;
+                        tRun = 64;
                     }
 
-                    try {
-                        
-                        number = std::stoll(line);
-                        n++;
-                        if(number != kernel_dout)
+                    while ((batch < tRun) && (n < tRows))
+                    {
+                        std::getline(in_file, line);
+                        if(j == 0)
                         {
-                            std::cout << "number mismatch at: " << n << " ; Actual Data: " << number << " ; Kernel Data: " << kernel_dout << std::endl;
-                            std::cout << "DEBUG J_val: " << j << std::endl;
-                            std::cout << "Total Numbers are: " << nrows << std::endl;
-                            in_file.close();
-                            return -1;
+                            buf_out0 = Data_Out0[d0_iter];       //Data_Out_Check
+                            buf_out1 = Data_Out1[d1_iter];       //Data_Out_Check
+                            buf_out2 = Data_Out2[d2_iter];       //Data_Out_Check
+                            buf_out3 = Data_Out3[d3_iter];       //Data_Out_Check
+
+                            d0_iter++;
+                            d1_iter++;
+                            d2_iter++;
+                            d3_iter++;
+                            mTr++;
+                            trCount++;
+
+                            kernel_dout = buf_out0.range(31,0);
+                            buf_out0 = buf_out0 >> 32;
+                            ++j;
+
                         }
-                        // std::cout << number << std::endl;
-                    } catch (const std::exception& e) {
-                        std::cerr << "Error: Invalid number format in line: " << line << std::endl;
+                        else
+                        {
+                            if (j > 47) {
+                                kernel_dout = buf_out3.range(31, 0);
+                                buf_out3 = buf_out3 >> 32;
+                            } else if (j > 31) {
+                                kernel_dout = buf_out2.range(31, 0);
+                                buf_out2 = buf_out2 >> 32;
+                            }
+                            else if (j > 15) {
+                                kernel_dout = buf_out1.range(31, 0);
+                                buf_out1 = buf_out1 >> 32;
+                            }
+                            else {
+                                kernel_dout = buf_out0.range(31, 0);
+                                buf_out0 = buf_out0 >> 32;
+                            }
+                            j+=1;
+                        }
+
+                        try {
+                            
+                            number = std::stoll(line);
+                            n++;
+                            if(number != kernel_dout)
+                            {
+                                std::cout << "number mismatch at: " << n << " ; Actual Data: " << number << " ; Kernel Data: " << kernel_dout << std::endl;
+                                std::cout << "DEBUG J_val: " << j << std::endl;
+                                std::cout << "DEBUG iter_val: " << d0_iter << std::endl;
+                                std::cout << "Total Numbers are: " << nrows << std::endl;
+                                in_file.close();
+                                return -1;
+                            }
+                            // std::cout << number << std::endl;
+                        } catch (const std::exception& e) {
+                            std::cerr << "Error: Invalid number format in line: " << line << std::endl;
+                        }
+                        ++batch;
                     }
-                    ++batch;
-
                     
-
                 }
-                
+            }
+            else
+            {
+                //discard the metaData
+                // std::cout << "n: " << n << std::endl;
+                // std::cout << "d0_iter: " << d0_iter << std::endl;
+                trCount++;
+                mTr++;
             }
         }
+        ++stripeCount;
+        trCount = 0;
+
+        
         
     }
 
@@ -1027,7 +1260,7 @@ int verif_all(int32_t *datain0, int32_t *datain1, int32_t *datain2, int32_t *dat
 }
 
 
-void update_patch_data(int32_t *datain0, int32_t *datain1, int32_t *datain2, int32_t *datain3, int32_t *track)
+void update_patch_data(int32_t *datain0, int32_t *datain1, int32_t *datain2, int32_t *datain3, int32_t *track, uint32_t nrows)
 {
 
     _128b *mTr;

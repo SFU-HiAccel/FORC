@@ -80,7 +80,6 @@ rtl_gen:
 		--run-hls \
 		--generate-task-rtl \
 		--run-floorplanning \
-		--enable-hbm-binding-adjustment \
 		--run-floorplan-dse \
 		--generate-top-rtl \
 		--pack-xo

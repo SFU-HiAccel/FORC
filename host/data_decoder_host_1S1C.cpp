@@ -43,57 +43,81 @@ int main(int argc, char* argv[]) {
     std::string nvme_file;
 
     ////ORC READER////
-    orc::ReaderOptions readerOpts;
-    std::unique_ptr<orc::Reader> reader =
-        orc::createReader(orc::readFile(orc_file, readerOpts.getReaderMetrics()), readerOpts);
+    if(proc_ORC)
+    {
+        orc::ReaderOptions readerOpts;
+        std::unique_ptr<orc::Reader> reader =
+            orc::createReader(orc::readFile(orc_file, readerOpts.getReaderMetrics()), readerOpts);
 
-    nvme_file = orc_file;
-    std::cout << "{ \"name\": \"" << orc_file << "\",\n";
-    uint64_t numberColumns = reader->getType().getMaximumColumnId() + 1;
+        nvme_file = orc_file;
+        std::cout << "{ \"name\": \"" << orc_file << "\",\n";
+        uint64_t numberColumns = reader->getType().getMaximumColumnId() + 1;
 
-    std::cout << "\n  \"file length\": " << reader->getFileLength() << ",\n";
-    // std::cout << "  \"type\": \"" << reader->getType().toString() << "\",\n";
-    
-    nrows = reader->getNumberOfRows();
-    std::cout << "  \"rows\": " << nrows << ",\n";
-    uint64_t stripeCount = reader->getNumberOfStripes();
-    std::cout << "  \"stripe count\": " << stripeCount << ",\n";
-    
-    if (stripeCount != 1) {
-        std::cerr << "Error: Stripe count is not one. Current stripe count: " << stripeCount << std::endl;
-        return 1;
-    }
-
-    for (uint64_t col = 0; col < numberColumns; ++col) {
-    orc::ColumnEncodingKind encoding = reader->getStripe(0)->getColumnEncoding(col);
-    std::cout << "         { \"column\": " << col << ", \"encoding\": \""
-        << columnEncodingKindToString(encoding) << "\"";
-    if (encoding == orc::ColumnEncodingKind_DICTIONARY ||
-        encoding == orc::ColumnEncodingKind_DICTIONARY_V2) {
-        std::cout << ", \"count\": " << reader->getStripe(0)->getDictionarySize(col);
-    }
-    std::cout << " }";
-    std::cout << std::endl;
-    }
-    
-    for (uint64_t str = 0; str < reader->getStripe(0)->getNumberOfStreams(); ++str) {
-    if (str != 0) {
-        std::cout << ",\n";
-    }
-    std::unique_ptr<orc::StreamInformation> stream = reader->getStripe(0)->getStreamInformation(str);
-    std::cout << "        { \"id\": " << str << ", \"column\": " << stream->getColumnId()
-        << ", \"kind\": \"" << streamKindToString(stream->getKind())
-        << "\", \"offset\": " << stream->getOffset() << ", \"length\": " << stream->getLength()
-        << " }";
-
-        if(stream->getKind() == 1) 
-        {
-            std::cout << "\n \nData stream found" << std::endl;
-            Data_offset = stream->getOffset();
-            Data_length = stream->getLength();
+        std::cout << "\n  \"file length\": " << reader->getFileLength() << ",\n";
+        // std::cout << "  \"type\": \"" << reader->getType().toString() << "\",\n";
+        
+        nrows = reader->getNumberOfRows();
+        std::cout << "  \"rows\": " << nrows << ",\n";
+        uint64_t stripeCount = reader->getNumberOfStripes();
+        std::cout << "  \"stripe count\": " << stripeCount << ",\n";
+        
+        if (stripeCount != 1) {
+            std::cerr << "Error: Stripe count is not one. Current stripe count: " << stripeCount << std::endl;
+            return 1;
         }
+
+        for (uint64_t col = 0; col < numberColumns; ++col) {
+        orc::ColumnEncodingKind encoding = reader->getStripe(0)->getColumnEncoding(col);
+        std::cout << "         { \"column\": " << col << ", \"encoding\": \""
+            << columnEncodingKindToString(encoding) << "\"";
+        if (encoding == orc::ColumnEncodingKind_DICTIONARY ||
+            encoding == orc::ColumnEncodingKind_DICTIONARY_V2) {
+            std::cout << ", \"count\": " << reader->getStripe(0)->getDictionarySize(col);
+        }
+        std::cout << " }";
+        std::cout << std::endl;
+        }
+        
+        for (uint64_t str = 0; str < reader->getStripe(0)->getNumberOfStreams(); ++str) {
+        if (str != 0) {
+            std::cout << ",\n";
+        }
+        std::unique_ptr<orc::StreamInformation> stream = reader->getStripe(0)->getStreamInformation(str);
+        std::cout << "        { \"id\": " << str << ", \"column\": " << stream->getColumnId()
+            << ", \"kind\": \"" << streamKindToString(stream->getKind())
+            << "\", \"offset\": " << stream->getOffset() << ", \"length\": " << stream->getLength()
+            << " }";
+
+            if(stream->getKind() == 1) 
+            {
+                std::cout << "\n \nData stream found" << std::endl;
+                Data_offset = stream->getOffset();
+                Data_length = stream->getLength();
+            }
+        }
+        reader.reset(); //
     }
-    reader.reset(); //
+    else
+    {
+
+        nrows = Myrows;
+        nvme_file = orc_file;
+        std::ifstream input_file(orc_file, std::ios::binary);
+        if (!input_file) {
+            std::cerr << "Error: failed to open input file." << std::endl;
+            return 1;
+        }
+
+        // Get the total file size
+        input_file.seekg(0, std::ios::end);
+        std::streampos file_size = input_file.tellg();
+        input_file.close();
+
+        Data_length = uint32_t(file_size);       
+        Data_offset = 0;
+        
+    
+    }
     std::cout << "Data_offset: " << Data_offset << std::endl;
     std::cout << "Data_length: " << Data_length << std::endl;
 

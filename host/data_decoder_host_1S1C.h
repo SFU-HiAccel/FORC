@@ -63,8 +63,10 @@ typedef ap_uint<32> _32b;
 const uint32_t RSIZE_DIV = 16;   //for SR it should be 4 else 16
 const uint32_t PIPELINE_DEPTH = 576;
 uint32_t nrows = 0;
-std::string orc_file = "test_data/8_bit.orc";
-std::string check_file = "test_data/8_bit_data.bin"; 
+uint32_t Myrows = 4782212;      //if proc_ORC is 0 you need to provide the rows.
+bool proc_ORC = 0;
+std::string orc_file = "/localhdd/awa159/orc_dataset/orc_decData/lineitem_col1_stripe10_data0.bin";     //"test_data/8_bit.orc";           // /localhdd/awa159/orc_dataset/orc_decData/lineitem_col1_stripe10_data0.bin
+std::string check_file = "/localhdd/awa159/orc_dataset/orc_decData/lineitem_col1_lastStripe.bin";   //"test_data/8_bit_data.bin";    // /localhdd/awa159/orc_dataset/orc_decData/lineitem_col1_lastStripe.bin
 
 const uint8_t SR = 0;
 const uint8_t DIRECT = 1;
