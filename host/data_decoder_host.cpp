@@ -26,10 +26,10 @@ void async_readnorm(struct aiocb* aio_rf, void* data_in, int Fd, int vector_size
 }
 
 void copy_data(unsigned char* src, unsigned char* dest, size_t size, size_t offset) {
-    // unsigned char* src_ptr = src + offset;
+    unsigned char* src_ptr = src;
     unsigned char* dest_ptr = dest + offset;
     for (size_t i = 0; i < size; ++i) {
-        dest_ptr[i] = src[i];
+        dest_ptr[i] = src_ptr[i];
     }
 }
 
@@ -80,19 +80,24 @@ void print_Fdata(uint8_t* data0, uint8_t* data1, uint8_t* data2, uint8_t* data3,
     }
     
     uint32_t stCount = 0;
-    int offset = 0;
+    uint32_t offset = 0;
+    uint32_t Doffset = 0;
+    // Array of pointers for easier access in the loop, with offset added
+    uint8_t* data_out_HBM[4];
+
     while (stCount < stripeCount) {
         // Read the total number of rows
-        int tRows = stripe_rows[stCount];
-        // offset = (stCount == 0) ? 0 : stripe_rows[stCount - 1];
-        
-        // Array of pointers for easier access in the loop, with offset added
-        uint8_t* data_out_HBM[4] = {
-            data0 + offset,
-            data1 + offset,
-            data2 + offset,
-            data3 + offset
-        };
+        uint32_t tRows = stripe_rows[stCount];
+        offset = (stCount == 0) ? 0 : stripe_rows[stCount - 1];
+        Doffset += offset;
+
+        std::cout << "Doffset: " << Doffset << std::endl;
+
+        // Assign each pointer individually
+        data_out_HBM[0] = data0 + Doffset;
+        data_out_HBM[1] = data1 + Doffset;
+        data_out_HBM[2] = data2 + Doffset;
+        data_out_HBM[3] = data3 + Doffset;
 
         // Start writing numbers from the pointers in sequence until tRows
         for (int row = 0, cRow = 0; cRow < tRows; cRow += (64)) {
@@ -115,7 +120,7 @@ void print_Fdata(uint8_t* data0, uint8_t* data1, uint8_t* data2, uint8_t* data3,
 }
 
 
-int verif_all(int32_t *datain0, int32_t *datain1, int32_t *datain2, int32_t *datain3, int32_t *track, uint32_t nrows, uint32_t *stripe_rows);
+int verif_all(int32_t *datain0, int32_t *datain1, int32_t *datain2, int32_t *datain3, int32_t *track, uint32_t nrows, uint32_t *stripe_rows, uint32_t stripeCount);
 
 void update_patch_data(int32_t *datain0, int32_t *datain1, int32_t *datain2, int32_t *datain3, int32_t *track, uint32_t nrows);
 
@@ -244,24 +249,24 @@ int main(int argc, char* argv[]) {
     //in ports
     for(int i = 0; i < BUFFERS_IN; i++)
     {
-        data_in_HBM[i] = reinterpret_cast<uint8_t*>(aligned_alloc(ALIGNED_BYTES, max_input_size));
+        data_in_HBM[i] = static_cast<uint8_t*>(aligned_alloc(ALIGNED_BYTES, max_input_size));
     }
     //out ports
     for (int i = 0; i < 8; ++i) {
-        data_out_HBM[i] = reinterpret_cast<uint8_t*>(aligned_alloc(ALIGNED_BYTES, max_output_size));
+        data_out_HBM[i] = static_cast<uint8_t*>(aligned_alloc(ALIGNED_BYTES, max_output_size));
     }
     //track ports
     for (int i = 8; i < BUFFERS_OUT; ++i) {
-        data_out_HBM[i] = reinterpret_cast<uint8_t*>(aligned_alloc(ALIGNED_BYTES, max_track_size));
+        data_out_HBM[i] = static_cast<uint8_t*>(aligned_alloc(ALIGNED_BYTES, max_track_size));
     }
 
     //Data ports for complete data
     //out ports
     for (int i = 0; i < 4; ++i) {
-        dataOut[i] = reinterpret_cast<uint8_t*>(aligned_alloc(ALIGNED_BYTES, nrows));
+        dataOut[i] = static_cast<uint8_t*>(aligned_alloc(ALIGNED_BYTES, nrows));
     }
     //track port
-    trackOut = reinterpret_cast<uint8_t*>(aligned_alloc(ALIGNED_BYTES, total_track_size));
+    trackOut = static_cast<uint8_t*>(aligned_alloc(ALIGNED_BYTES, total_track_size));
 
 
    ///////Opening SSD////////
@@ -569,7 +574,7 @@ int main(int argc, char* argv[]) {
         #endif
         ///////Launching KERNEL DATAFLOW////////
             //non multiple RL adjustment
-            stripeCount -= 9;    //remove stripes
+            // stripeCount -= 833;    //remove stripes
 
             uint32_t NITERS = stripeCount + 4;  //IO, C2F, FCOMP, F2C, dCopy
 
@@ -612,6 +617,10 @@ int main(int argc, char* argv[]) {
             // async_readnorm(void* data_in, int nvmeFd, int vector_size_bytes, int offset)
             // std::cout << "Starting DF, Total Iters: " << NITERS << std::endl;
             // std::cout << "stripeCount: " << stripeCount << std::endl;
+            uint32_t offsetD = 0;
+            uint32_t offsetT = 0;
+            uint32_t dSize_prev = 0;
+            uint32_t tTrackSize_prev = 0;
             std::thread t1, t2, t3, t4, t5; // Declare threads outside the if block
 
             auto dfstart = std::chrono::steady_clock::now();
@@ -744,20 +753,22 @@ int main(int argc, char* argv[]) {
                     if((i >= 4) && (i < (stripeCount+4)))
                     {
                         uint32_t dRow = stripe_rows[i-4];
-                        uint32_t tTrack = (uint32_t)((float)(dRow) * 1.17);
-                        uint32_t offsetD = 0;
-                        uint32_t offsetT = 0;
+                        // uint32_t tTrack = (uint32_t)((float)(dRow) * 1.17);
+                        uint32_t tTrack = dRow *1;
+                        uint32_t tRem = tTrack%16;  //128bit is 16bytes
+                        if(tRem != 0)
+                        {
+                            tTrack += (16 - tRem);
+                        }
+
+                        // std::cout << "dRow: " << dRow << std::endl;
+                        // std::cout << "tTrack: " << tTrack << std::endl;
                         
-                        if(i == 4)
-                        {
-                            offsetD = 0;
-                            offsetT = 0;
-                        }
-                        else
-                        {
-                            offsetD = dRow;
-                            offsetT = tTrack;
-                        }
+                        offsetD += dSize_prev;
+                        offsetT += tTrackSize_prev;
+
+                        // std::cout << "offsetD: " << offsetD << std::endl;
+                        // std::cout << "offsetT: " << offsetT << std::endl;
 
                         if (((i - 4) % 2) == 0) {
                             // Launch threads with offset handling
@@ -774,6 +785,10 @@ int main(int argc, char* argv[]) {
                             t4 = std::thread(copy_data, data_out_HBM[7], dataOut[3], dRow, offsetD);
                             t5 = std::thread(copy_data, data_out_HBM[9], trackOut, tTrack, offsetT);
                         }
+
+                        dSize_prev = dRow;
+                        tTrackSize_prev = tTrack;
+
                     }
                     asyncTimeE = std::chrono::steady_clock::now();
                     asyncTime = std::chrono::duration_cast<std::chrono::microseconds>(asyncTimeE - asyncTimeS);
@@ -886,11 +901,20 @@ int main(int argc, char* argv[]) {
                     //IO READ
                     memset(data_in_HBM[0], 0, max_input_size);
                     async_readnorm(&aio_rf, (void *)(data_in_HBM[0]), nvmeFd, Data_lengths[i], Data_offsets[i]);  
+
+                    std::cout << "Data_lengths[i]: " << Data_lengths[i] << std::endl;
+                    std::cout << "Data_offsets[i]: " << Data_offsets[i] << std::endl;
+
+
                     while( aio_error(&aio_rf) == EINPROGRESS ) {;}
                     int ret = aio_return (&aio_rf);
                     if(ret <= 0)
                     {
                         std::cerr << "Read Error. Bytes Read: " << ret << std::endl;
+                    }
+                    else
+                    {
+                        std::cout << "Bytes Read: " << ret << std::endl;
                     }
 
                     //CPU_2_FPGA
@@ -947,26 +971,12 @@ int main(int argc, char* argv[]) {
                     }
                     std::cout << "dSize: " << dSize << std::endl;
                     std::cout << "tTrackSize: " << tTrackSize << std::endl;
-                    uint32_t offsetD = 0;
-                    uint32_t offsetT = 0;
                     
-                    if(i == 0)
-                    {
-                        offsetD = 0;
-                        offsetT = 0;
-                    }
-                    else
-                    {
-                        uint32_t dOffset = stripe_rows[i-1];
-                        uint32_t tOffset = dOffset * 1;
-                        tRem = tOffset%16;  //128bit is 16bytes
-                        if(tRem != 0)
-                        {
-                            tOffset += (16 - tRem);
-                        }
-                        offsetD = dOffset;
-                        offsetT = tOffset;
-                    }
+                    offsetD += dSize_prev;
+                    offsetT += tTrackSize_prev;
+
+                    std::cout << "offsetD: " << offsetD << std::endl;
+                    std::cout << "offsetT: " << offsetT << std::endl;
 
                     t1 = std::thread(copy_data, data_out_HBM[0], dataOut[0], dSize, offsetD);
                     t2 = std::thread(copy_data, data_out_HBM[2], dataOut[1], dSize, offsetD);
@@ -979,6 +989,9 @@ int main(int argc, char* argv[]) {
                     t3.join();
                     t4.join();
                     t5.join();
+
+                    dSize_prev = dSize;
+                    tTrackSize_prev = tTrackSize;
 
                     // print_data(data_out_HBM[0], data_out_HBM[2], data_out_HBM[4], data_out_HBM[6], dSize, 0);
                     // print_data(dataOut[0], dataOut[1], dataOut[2], dataOut[3], dSize, offsetD);
@@ -996,13 +1009,14 @@ int main(int argc, char* argv[]) {
             if(dataVerif)
             {
                 //Data Verification
-                // verif_all(reinterpret_cast<int32_t*>(dataOut[0]), 
-                //         reinterpret_cast<int32_t*>(dataOut[1]), 
-                //         reinterpret_cast<int32_t*>(dataOut[2]), 
-                //         reinterpret_cast<int32_t*>(dataOut[3]), 
-                //         reinterpret_cast<int32_t*>(trackOut), 
-                //         nrows, 
-                //         stripe_rows.data());
+                verif_all(reinterpret_cast<int32_t*>(dataOut[0]), 
+                        reinterpret_cast<int32_t*>(dataOut[1]), 
+                        reinterpret_cast<int32_t*>(dataOut[2]), 
+                        reinterpret_cast<int32_t*>(dataOut[3]), 
+                        reinterpret_cast<int32_t*>(trackOut), 
+                        nrows, 
+                        stripe_rows.data(),
+                        stripeCount);
 
                 print_Fdata(dataOut[0], dataOut[1], dataOut[2], dataOut[3], stripe_rows.data(), stripeCount);
             }
@@ -1068,7 +1082,7 @@ int main(int argc, char* argv[]) {
     return 0;
 }
 
-int verif_all(int32_t *datain0, int32_t *datain1, int32_t *datain2, int32_t *datain3, int32_t *track, uint32_t nrows, uint32_t *stripe_rows)
+int verif_all(int32_t *datain0, int32_t *datain1, int32_t *datain2, int32_t *datain3, int32_t *track, uint32_t nrows, uint32_t *stripe_rows, uint32_t stripeCount)
 {
     int64_t kernel_dout = 0;
     ap_int<AXI_WIDTH> buf_out0 = 0;
@@ -1114,14 +1128,14 @@ int verif_all(int32_t *datain0, int32_t *datain1, int32_t *datain2, int32_t *dat
     uint8_t PLL = 0;
     int64_t number = 0;
     uint32_t tRows = 0;
-    uint32_t stripeCount = 0;
     uint32_t trCount = 0;
+    uint32_t stripeCnt = 0;
 
-    while(n < nrows)
+    while((n < nrows) && (stripeCnt < stripeCount))
     {
 
         //metaData size read limit
-        uint32_t dRow = stripe_rows[stripeCount];
+        uint32_t dRow = stripe_rows[stripeCnt];
         tRows += dRow;
         uint32_t trackSize = dRow*1;
         uint32_t tRem = trackSize%16;
@@ -1129,7 +1143,7 @@ int verif_all(int32_t *datain0, int32_t *datain1, int32_t *datain2, int32_t *dat
         {
             trackSize += (16-tRem);
         }
-        trackSize = trackSize/16;       //total track count for mTr array
+        trackSize = trackSize/16;       //total track count for mTr array 128/8=16
 
         std::cout << "dRow: " << dRow << std::endl;
         std::cout << "trackSize: " << trackSize << std::endl;
@@ -1169,6 +1183,9 @@ int verif_all(int32_t *datain0, int32_t *datain1, int32_t *datain2, int32_t *dat
                     while ((batch < tRun) && (n < tRows))
                     {
                         std::getline(in_file, line);
+                        // Clean up line by removing whitespace
+                        line.erase(std::remove_if(line.begin(), line.end(), ::isspace), line.end());
+
                         if(j == 0)
                         {
                             buf_out0 = Data_Out0[d0_iter];       //Data_Out_Check
@@ -1209,21 +1226,25 @@ int verif_all(int32_t *datain0, int32_t *datain1, int32_t *datain2, int32_t *dat
                         }
 
                         try {
-                            
-                            number = std::stoll(line);
-                            n++;
-                            if(number != kernel_dout)
-                            {
-                                std::cout << "number mismatch at: " << n << " ; Actual Data: " << number << " ; Kernel Data: " << kernel_dout << std::endl;
-                                std::cout << "DEBUG J_val: " << j << std::endl;
-                                std::cout << "DEBUG iter_val: " << d0_iter << std::endl;
-                                std::cout << "Total Numbers are: " << nrows << std::endl;
-                                in_file.close();
-                                return -1;
-                            }
-                            // std::cout << number << std::endl;
-                        } catch (const std::exception& e) {
-                            std::cerr << "Error: Invalid number format in line: " << line << std::endl;
+                            // Check if the line is empty or contains non-numeric characters
+                            if (!line.empty() && std::all_of(line.begin(), line.end(), ::isdigit)) {
+                                number = std::stoll(line);
+                                n++;
+                                    if (number != kernel_dout) {
+                                        std::cout << "number mismatch at: " << n << " ; Actual Data: " << number << " ; Kernel Data: " << kernel_dout << std::endl;
+                                        std::cout << "DEBUG J_val: " << j << std::endl;
+                                        std::cout << "DEBUG iter_val: " << d0_iter << std::endl;
+                                        std::cout << "Total Numbers are: " << nrows << std::endl;
+                                        in_file.close();
+                                        return -1;
+                                    }
+                                } 
+                                // else {
+                                //     std::cerr << "Error: Invalid number format in line (ignoring non-numeric or empty line): " << line << std::endl;
+                                // }
+                        } 
+                        catch (const std::exception& e) {
+                            std::cerr << "Error: Exception occurred while converting line to number: " << line << std::endl;
                         }
                         ++batch;
                     }
@@ -1239,7 +1260,7 @@ int verif_all(int32_t *datain0, int32_t *datain1, int32_t *datain2, int32_t *dat
                 mTr++;
             }
         }
-        ++stripeCount;
+        ++stripeCnt;
         trCount = 0;
 
         

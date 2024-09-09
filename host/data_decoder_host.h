@@ -68,12 +68,12 @@ const uint32_t BUFFERS_OUT = 10;
 const uint32_t ALIGNED_BYTES = 4096;
 // const std::string TARGET_DEVICE_NAME = "xilinx_u280_xdma_201920_3";
 
-bool dataflow = false;
+bool dataflow = true;
 bool dataVerif = true;
 const uint32_t RSIZE_DIV = 16;   //for SR it should be 4 else 16
 const uint32_t PIPELINE_DEPTH = 576;
-std::string orc_file = "/localhdd/awa159/orc_dataset/orc_decData/lineitem_col1_16orc.orc";//"test_data/8_bit.orc", "/localhdd/awa159/tpcds88.orc"; , /localhdd/awa159/orc_dataset/orc_decData/lineitem_col1_16orc.orc
-std::string check_file = "/localhdd/awa159/orc_dataset/orc_decData/lineitem_col1.bin";    //        "test_data/8_bit_data.bin" , /localhdd/awa159/orc_dataset/orc_decData/lineitem_col1.bin
+std::string orc_file = "test_data/8_bit.orc";//   "8_bit_data_MS_orc.orc"  "test_data/8_bit.orc", "/localhdd/awa159/tpcds88.orc"; , /localhdd/awa159/orc_dataset/orc_decData/lineitem_col1_16orc.orc, /mnt/smartssd_0n/awa159/orc_decData/lineitem_col1_16orc.orc
+std::string check_file = "test_data/8_bit_data.bin";    //     "8_bit_data.bin"   "test_data/8_bit_data.bin" , /localhdd/awa159/orc_dataset/orc_decData/lineitem_col1.bin, /mnt/smartssd_0n/awa159/orc_decData/lineitem_col1.bin
 
 const uint8_t SR = 0;
 const uint8_t DIRECT = 1;
