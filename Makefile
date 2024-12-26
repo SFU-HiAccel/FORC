@@ -52,8 +52,8 @@ endif
 TOP := orc_proc
 
 SRC_NAME := orc_proc
-SOURCES := $(SRC_NAME).cpp $(SRC_NAME)_host.cpp
-DSOURCES := $(SRC_NAME).cpp $(SRC_NAME)_hostF.cpp
+SOURCES := kernel/$(SRC_NAME).cpp kernel/$(SRC_NAME)_host.cpp
+DSOURCES := kernel/$(SRC_NAME).cpp kernel/$(SRC_NAME)_hostF.cpp
 
 
 all: $(OUTPUT) rtl_gen
@@ -99,12 +99,12 @@ CLK ?= 3.333
 
 rtl_gen:
 	platform=$(PLATFORM)  
-	tapac -o $(OUTPUT).$(PLATFORM).hw.xo $(SRC_NAME).cpp \
+	tapac -o $(OUTPUT).$(PLATFORM).hw.xo kernel/$(SRC_NAME).cpp \
 		--platform $(PLATFORM) \
 		--clock-period $(CLK) \
 		--top $(TOP) \
 		--work-dir $(OUTPUT).$(PLATFORM).hw.xo.tapa \
-		--connectivity $(INI) \
+		--connectivity kernel/$(INI) \
 		--enable-floorplan \
 		--floorplan-output constraint.tcl \
 		$(EXTRA_FLAGS) \
