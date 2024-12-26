@@ -38,7 +38,7 @@ LIBRARIES := -std=c++17 -ltinyxml -lpthread -lrt -lgmp -lmpfr -ltapa -lfrt -lglo
 ORC_LIBRARIES := -lorc -lprotobuf -lzstd -lsnappy -llz4 -lpthread -lz
 
 # Initializers
-OUTPUT := decoder2
+OUTPUT := decoder
 OUTPUT1S1C := decoder1S1C
 TARGET ?= hw
 ifeq ($(filter $(TARGET),sw_emu hw_emu hw),)
@@ -79,6 +79,7 @@ rtl_gen:
 		--run-tapacc \
 		--run-hls \
 		--generate-task-rtl \
+		--floorplan-pre-assignments kernel/floorplan-region-to-instances.json \
 		--run-floorplanning \
 		--run-floorplan-dse \
 		--generate-top-rtl \

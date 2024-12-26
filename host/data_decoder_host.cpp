@@ -1420,7 +1420,7 @@ void update_patch_data(int32_t *datain0, int32_t *datain1, int32_t *datain2, int
                 //loop control
                 if(TRL <= 64)
                 {
-                    TRL = 0;
+                    TRL = TRL;
                 }
                 else
                 {
