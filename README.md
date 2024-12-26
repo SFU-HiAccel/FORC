@@ -1,6 +1,6 @@
 # FORC
 
-FORC is a high-throughput streaming-based FPGA accelerator overlay that supports different ORC file format decoders, and its dataflow integration with Apache ORC. Experimental results show that FORC achieves up to 12.9GB/s decoding throughput on AMD/Xilinx Alveo U280 FPGA, with a geomean speedup of 65x (up to 335x) over the CPU. For more information please refer to our published paper.
+FORC is a high-throughput streaming-based FPGA accelerator overlay that supports processing ORC file format including ORC Zlib decompression, decoding and filtering, and its dataflow integration with Apache ORC. Experimental results show that FORC achieves up to 2.4GB/s throughput on AMD/Xilinx Alveo U280 FPGA, with a geomean speedup of 128x over the CPU. For more information please refer to our published paper.
 [FPL 2024] FORC: A High-Throughput Streaming FPGA Accelerator for Optimized Row Columnar File Decoders in Big Data Engines[Link](https://www.sfu.ca/~zhenman/files/C38-FPL2024-FORC.pdf)
 
 # SYSTEM REQUIREMENTS
@@ -45,7 +45,7 @@ For Single Stripe Single Column
 % ./decoder1S1C --bitstream decoder.xilinx_u280_xdma_201920_3.hw.xo.tapa/run-1/vitis_run_hw/data_decoding_xilinx_u280_xdma_201920_3.xclbin
 ```
 
-For Dataflow HW Runs
+For Dataflow HW Runs. The code has been tested with g++ version of 7.5.0.
 
 ```shell
 % make gpp

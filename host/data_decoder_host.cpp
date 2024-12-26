@@ -1,16 +1,22 @@
-#include "data_decoder_host.h"
+#include "orc_proc_hostF.h"
 
-void data_decoding(tapa::mmap<_512b> input_port, 
+void orc_proc(tapa::mmap<_512b> input_port, 
+                    tapa::mmap<_512b> FilterConf_port,
                     tapa::mmap<_512b> output_port0_32b_8b, 
                     tapa::mmap<_512b> output_port1_16b_8b,
                     tapa::mmap<_512b> output_port2_16b_8b,
                     tapa::mmap<_512b> output_port3_8b,
+                    tapa::mmap<_512b> data_Idx,
                     tapa::mmap<_512b> output_port4_Track,
-                    uint32_t wait_count, 
                     uint32_t data_count
                     );
 
 DEFINE_string(bitstream, "", "path to bitstream file, run csim if empty");
+DEFINE_string(comp, "", "Compressed zlib file path");
+DEFINE_string(orig, "", "Original file path");
+DEFINE_bool(is_orc, false, "Specify whether the input file is an ORC file");
+DEFINE_int32(RR, 0, "Right Range (RR) value");
+DEFINE_bool(VERIF, false, "Specify whether to verify Output");
 
 void async_readnorm(struct aiocb* aio_rf, void* data_in, int Fd, int vector_size_bytes, int offset)
 {
@@ -24,7 +30,6 @@ void async_readnorm(struct aiocb* aio_rf, void* data_in, int Fd, int vector_size
         printf("Read Failed: %d \n", result);
     }
 }
-
 void copy_data(unsigned char* src, unsigned char* dest, size_t size, size_t offset) {
     unsigned char* src_ptr = src;
     unsigned char* dest_ptr = dest + offset;
@@ -33,13 +38,13 @@ void copy_data(unsigned char* src, unsigned char* dest, size_t size, size_t offs
     }
 }
 
-void writeZeros(void* ptr, uint32_t offset, uint32_t size) {
-    // Calculate the address with the offset
-    void* target = static_cast<char*>(ptr) + offset;
+// void writeZeros(void* ptr, uint32_t offset, uint32_t size) {
+//     // Calculate the address with the offset
+//     void* target = static_cast<char*>(ptr) + offset;
 
-    // Write zeros to the memory region
-    memset(target, 0, size);
-}
+//     // Write zeros to the memory region
+//     memset(target, 0, size);
+// }
 
 void print_data(uint8_t* data0, uint8_t* data1, uint8_t* data2, uint8_t* data3, uint32_t stripe_rows, uint32_t offset) {
     // Read the total number of rows
@@ -119,170 +124,228 @@ void print_Fdata(uint8_t* data0, uint8_t* data1, uint8_t* data2, uint8_t* data3,
     outFile.close();  // Close the file when done
 }
 
+void processFlags(const std::vector<_512b, tapa::aligned_allocator<_512b>>& data);
 
-int verif_all(int32_t *datain0, int32_t *datain1, int32_t *datain2, int32_t *datain3, int32_t *track, uint32_t nrows, uint32_t *stripe_rows, uint32_t stripeCount);
+void verif_sorted(std::vector<int32_t> combinedData, uint32_t* FilRows);
 
-void update_patch_data(int32_t *datain0, int32_t *datain1, int32_t *datain2, int32_t *datain3, int32_t *track, uint32_t nrows);
+void update_patch_data(int32_t *datain0, int32_t *datain1, int32_t *datain2, int32_t *datain3, int32_t *track);
+
 
 int main(int argc, char* argv[]) {
     gflags::ParseCommandLineFlags(&argc, &argv, /*remove_flags=*/true);
 
-    uint32_t file_size_rem = 0;
-    uint32_t KRNL_file_size_bytes = 0;
-    std::vector<uint32_t> Data_offsets;
-    std::vector<uint32_t> Data_lengths;
-    std::vector<uint32_t> stripe_rows;  // Array to store the number of rows in each stripe
-    uint32_t Data_offset = 0;
-    uint32_t KRNL_Data_Write = 0;
-    uint32_t wait_count = 32;  //max FIFO depth for hardware and try 2147483 for csim
-    std::string nvme_file;
-
-    uint32_t max_stripe_rows = 0;  // Variable to store the maximum number of rows in any stripe
-    uint32_t max_data_length = 0;  // Variable to store the maximum data length
-    uint32_t total_data_length = 0;  // Variable to store the sum of all data lengths
-
-    ////ORC READER////
-    orc::ReaderOptions readerOpts;
-    std::unique_ptr<orc::Reader> reader =
-        orc::createReader(orc::readFile(orc_file, readerOpts.getReaderMetrics()), readerOpts);
-
-    nvme_file = orc_file;
-    
-    uint32_t numberColumns = reader->getType().getMaximumColumnId() + 1;
-    uint32_t nrows = reader->getNumberOfRows();
-    uint32_t stripeCount = reader->getNumberOfStripes();
-
-    #ifdef PRINT_DEBUG
-        std::cout << "{ \"name\": \"" << orc_file << "\",\n";
-        std::cout << "\n  \"file length\": " << reader->getFileLength() << ",\n";
-        std::cout << "  \"rows\": " << nrows << ",\n";
-        std::cout << "  \"stripe count\": " << stripeCount << ",\n";
-    #endif
-
-    if (stripeCount == 0) {
-        std::cerr << "Error: Stripe count is zero. Read stripe count: " << stripeCount << std::endl;
-        return 1;
-    }
-
-    for (uint32_t col = 0; col < numberColumns; ++col) {
-        orc::ColumnEncodingKind encoding = reader->getStripe(0)->getColumnEncoding(col);
-        #ifdef PRINT_DEBUG
-            std::cout << "         { \"column\": " << col << ", \"encoding\": \""
-                    << columnEncodingKindToString(encoding) << "\"";
-            if (encoding == orc::ColumnEncodingKind_DICTIONARY ||
-                encoding == orc::ColumnEncodingKind_DICTIONARY_V2) {
-                std::cout << ", \"count\": " << reader->getStripe(0)->getDictionarySize(col);
-            }
-            std::cout << " }";
-            std::cout << std::endl;
-        #endif
-    }
-
-    for (uint32_t str = 0; str < stripeCount; ++str) {
-        auto stripe = reader->getStripe(str);
-        stripe_rows.push_back(stripe->getNumberOfRows());  // Populate the stripe_rows array
-        // std::cout << "Stripe " << str << " has " << stripe->getNumberOfRows() << " rows.\n";  // Print the number of rows in each stripe
-
-        for (uint32_t streamIdx = 0; streamIdx < stripe->getNumberOfStreams(); ++streamIdx) {
-            std::unique_ptr<orc::StreamInformation> stream = stripe->getStreamInformation(streamIdx);
-            #ifdef PRINT_DEBUG
-                if (streamIdx != 0) {
-                    std::cout << ",\n";
-                }
-                std::cout << "        { \"id\": " << streamIdx << ", \"column\": " << stream->getColumnId()
-                        << ", \"kind\": \"" << streamKindToString(stream->getKind())
-                        << "\", \"offset\": " << stream->getOffset() << ", \"length\": " << stream->getLength()
-                        << " }";
-            #endif
-            if (stream->getKind() == 1) {
-                // std::cout << "Data stream found" << std::endl;
-                Data_offsets.push_back(stream->getOffset());
-                Data_lengths.push_back(stream->getLength());
-            }
-        }
-    }
-    // Finding the maximum values
-    if (!stripe_rows.empty()) {
-        max_stripe_rows = static_cast<uint32_t>(*std::max_element(stripe_rows.begin(), stripe_rows.end()));
-    } else {
-        std::cout << "stripe_rows vector is empty." << std::endl;
-    }
-
-    if (!Data_lengths.empty()) {
-    max_data_length = *std::max_element(Data_lengths.begin(), Data_lengths.end());
-    total_data_length = std::accumulate(Data_lengths.begin(), Data_lengths.end(), 0);
-    } else {
-        std::cout << "Data_lengths vector is empty." << std::endl;
-    }
-    reader.reset();
-
-    std::cout << "Total Stripes: " << stripeCount << std::endl;
-    std::cout << "Maximum number of rows in any stripe: " << max_stripe_rows << std::endl;
-    std::cout << "Maximum data length: " << max_data_length << std::endl;
-    std::cout << "Total data length: " << total_data_length << std::endl;
-    std::cout << "Total rows: " << nrows << std::endl;
-
-    uint8_t* data_in_HBM[BUFFERS_IN]; 
-    uint8_t* data_out_HBM[BUFFERS_OUT];
 
     uint8_t* dataOut[4]; 
     uint8_t* trackOut;
-    
-    uint32_t max_input_size = max_data_length+PIPELINE_DEPTH+64;
-    uint32_t max_output_size = max_stripe_rows; //MAX OUTPUT SIZE BYTES = (max_stripe_rows*4) , div 4 as data is divided in 4 ports 
-    uint32_t max_track_size = max_stripe_rows*1; //max it can be 2x of the one data port size
+    uint8_t* idxOut;
+    uint32_t* filterRowCount;
 
-    uint32_t trackRem = max_track_size%16;
-    if(trackRem != 0)       //128bit is 16bytes
-    {
-        max_track_size += (16 - trackRem);
+    uint32_t ORIG_file_size_bytes = 0;
+    uint32_t file_size_rem = 0;
+    uint32_t KRNL_file_size_bytes = 0;
+    uint32_t Aligned_KRNL_file_size_bytes = 0;
+    uint32_t KRNL_file_size_count = 0;
+    uint32_t file_size_bytes = 0;
+    uint32_t Data_offset = 0;
+    uint32_t Data_length = 0;
+    uint32_t KRNL_Data_Write = 0;
+    std::string nvme_file;
+
+    if (FLAGS_comp.empty()) {
+        std::cerr << "Error: Encoded file path (--enc) is required." << std::endl;
+        return EXIT_FAILURE;
     }
 
-    uint32_t total_track_size = nrows*1; 
-    trackRem = total_track_size%16;
-    if(trackRem != 0)       //128bit is 16bytes
-    {
-        total_track_size += (16 - trackRem);
+    // Open the compressed file
+    std::ifstream comp_file(FLAGS_comp, std::ios::binary);
+    if (!comp_file.is_open()) {
+        std::cerr << "Error: Could not open encoded file " << FLAGS_comp << std::endl;
+        return EXIT_FAILURE;
     }
 
-    //Declare 256MB each
-    //in ports
+    nvme_file = FLAGS_comp;
+    uint64_t stripeCount = 0;
+    if (FLAGS_is_orc)
+    {
+        ////ORC READER////
+        orc::ReaderOptions readerOpts;
+        std::unique_ptr<orc::Reader> reader =
+            orc::createReader(orc::readFile(FLAGS_comp, readerOpts.getReaderMetrics()), readerOpts);
+
+        // nvme_file = orc_file;
+        std::cout << "{ \"name\": \"" << FLAGS_comp << "\",\n";
+        uint64_t numberColumns = reader->getType().getMaximumColumnId() + 1;
+
+        std::cout << "\n  \"file length\": " << reader->getFileLength() << ",\n";
+        // std::cout << "  \"type\": \"" << reader->getType().toString() << "\",\n";
+        
+        // nrows = reader->getNumberOfRows();
+        std::cout << "  \"rows\": " << reader->getNumberOfRows() << ",\n";
+        stripeCount = reader->getNumberOfStripes();
+        std::cout << "  \"stripe count\": " << stripeCount << ",\n";
+
+        for (uint64_t col = 0; col < numberColumns; ++col) {
+        orc::ColumnEncodingKind encoding = reader->getStripe(0)->getColumnEncoding(col);
+        std::cout << "         { \"column\": " << col << ", \"encoding\": \""
+            << columnEncodingKindToString(encoding) << "\"";
+        if (encoding == orc::ColumnEncodingKind_DICTIONARY ||
+            encoding == orc::ColumnEncodingKind_DICTIONARY_V2) {
+            std::cout << ", \"count\": " << reader->getStripe(0)->getDictionarySize(col);
+        }
+        std::cout << " }";
+        std::cout << std::endl;
+        }
+        
+        std::unique_ptr<orc::StripeInformation> stripeInfo = reader->getStripe(0);
+        nrows = stripeInfo->getNumberOfRows();
+        std::cout << "  \"rows in stripe 0\": " << nrows << ",\n";
+        for (uint64_t str = 0; str < reader->getStripe(0)->getNumberOfStreams(); ++str) {
+        if (str != 0) {
+            std::cout << ",\n";
+        }
+        std::unique_ptr<orc::StreamInformation> stream = reader->getStripe(0)->getStreamInformation(str);
+        std::cout << "        { \"id\": " << str << ", \"column\": " << stream->getColumnId()
+            << ", \"kind\": \"" << streamKindToString(stream->getKind())
+            << "\", \"offset\": " << stream->getOffset() << ", \"length\": " << stream->getLength()
+            << " }";
+
+            if(stream->getKind() == 1) 
+            {
+                std::cout << "\n \nData stream found" << std::endl;
+                Data_offset = stream->getOffset();
+                Data_length = stream->getLength();
+            }
+        }
+        reader.reset(); //       
+    }
+    else
+    {
+        // Set total rows in header file incase not orc file
+        nrows = Myrows;
+        stripeCount = 1;
+        comp_file.seekg(0, std::ios::end);
+        Data_length = static_cast<uint64_t>(comp_file.tellg());  // Cast tellg() to uint64_t
+        comp_file.seekg(0, std::ios::beg);
+        
+        Data_offset = 0;        
+    }
+    std::cout << "Data_offset: " << Data_offset << std::endl;
+    std::cout << "Data_length: " << Data_length << std::endl;
+    std::cout << "Number of rows are: " << nrows << std::endl;    
+
+
+    ///////DECLARE READ WRITE HOST PTRs////////
+    uint8_t* data_in_HBM[BUFFERS_IN];           //input port
+    uint8_t* FilterConf_HBM[BUFFERS_IN];           //Filter Conf 
+    uint8_t* data_out_HBM[BUFFERS_OUT];         //4 output, 1 meta and 1 idx    = 5*2 = 12
+
+    uint32_t max_input_size = Data_length;
+    uint32_t max_output_size = nrows/64;
+    uint32_t remR =  nrows%64;
+    if(remR!=0)
+    {
+        max_output_size+=1;
+    }
+    max_output_size = max_output_size*64;
+    uint32_t max_track_size = max_output_size*1.2; //max it can be 2x of the one data port size
+    remR = max_track_size%16;  //128bit is 16bytes
+    if(remR != 0)
+    {
+        max_track_size += (16 - remR);
+    }
+
+    uint32_t filterConfSize = 192;
+
     for(int i = 0; i < BUFFERS_IN; i++)
     {
         data_in_HBM[i] = static_cast<uint8_t*>(aligned_alloc(ALIGNED_BYTES, max_input_size));
     }
-    //out ports
-    for (int i = 0; i < 8; ++i) {
+    for(int i = 0; i < BUFFERS_IN; i++)
+    {
+        FilterConf_HBM[i] = static_cast<uint8_t*>(aligned_alloc(ALIGNED_BYTES, 192));
+    }
+    //out ports and idx port
+    for (int i = 0; i < BUFFERS_OUT-2; ++i) {
         data_out_HBM[i] = static_cast<uint8_t*>(aligned_alloc(ALIGNED_BYTES, max_output_size));
     }
     //track ports
-    for (int i = 8; i < BUFFERS_OUT; ++i) {
+    for (int i = BUFFERS_OUT-2; i < BUFFERS_OUT; ++i) {
         data_out_HBM[i] = static_cast<uint8_t*>(aligned_alloc(ALIGNED_BYTES, max_track_size));
     }
 
-    //Data ports for complete data
-    //out ports
     for (int i = 0; i < 4; ++i) {
-        dataOut[i] = static_cast<uint8_t*>(aligned_alloc(ALIGNED_BYTES, nrows));
+        dataOut[i] = static_cast<uint8_t*>(aligned_alloc(ALIGNED_BYTES, (max_output_size*DATA_MUL)));
     }
     //track port
-    trackOut = static_cast<uint8_t*>(aligned_alloc(ALIGNED_BYTES, total_track_size));
+    trackOut = static_cast<uint8_t*>(aligned_alloc(ALIGNED_BYTES, (max_track_size*DATA_MUL)));
+    idxOut = static_cast<uint8_t*>(aligned_alloc(ALIGNED_BYTES, (max_output_size*DATA_MUL)));
+    filterRowCount = static_cast<uint32_t*>(aligned_alloc(ALIGNED_BYTES, (stripeCount*DATA_MUL)*192));
 
+    //Write Filter Config
+    uint8_t idx_flag = 0;           //use filter condition(0),  use stored idx(1)
+    uint8_t range_flag = 0;         //either use both ranges(1), or only right range(0) , Currently unused (using both in ranges in kernel)
+    uint8_t RROP = 0;
+    uint8_t LROP = 0;
+    int32_t RR = 0;
+    int32_t LR = 0;
 
-   ///////Opening SSD////////
-    auto FileTimeS = std::chrono::steady_clock::now();
-    
-    nvmeFd = open(nvme_file.c_str(), O_RDONLY); //O_SYNC O_DIRECT  O_RDONLY  O_RDWR
-    if (nvmeFd < 0) {
-        std::cerr << "ERROR: open " << nvme_file << "failed: " << std::endl;
-        return EXIT_FAILURE;
+    RROP = 2;   // less than(1), less than equal to(2)
+    LROP = 6;   //  5 = greater than, 6 = greater than equal
+    RR = FLAGS_RR;   //SR->300, DD->100, max 4294967295, ...100000000<#<330000000 ... LR<#<RR ... 4294967295 ... 2147483647
+    LR = 0;    //SR->10, DD->30
+
+    _512b filconf = (uint32_t)(LR);
+    filconf = filconf << 32;    //4
+    filconf = filconf | (uint32_t)(RR);
+    filconf = filconf << 8;     //1
+    filconf = filconf | LROP;
+    filconf = filconf << 8;     //1
+    filconf = filconf | RROP;
+    filconf = filconf << 8;     //1
+    filconf = filconf | range_flag;
+    filconf = filconf << 8;     //1
+    filconf = filconf | idx_flag;
+
+    uint32_t MyremDiv = nrows%64;
+    uint32_t readCnt = nrows/64;
+    if(MyremDiv!=0)
+    {
+        readCnt += 1;
     }
-    auto FileTimeE = std::chrono::steady_clock::now();
-    auto FileTime = std::chrono::duration_cast<std::chrono::microseconds>(FileTimeE - FileTimeS);
-    std::cout << "File Opening Time (us):  " << FileTime.count() << std::endl;
-    std::cout << "INFO: Successfully opened NVME SSD1 " << nvme_file << std::endl;
-    ////////////////////////////
 
+    // Cast the FilterConf_HBM pointer to an ap_uint<512>* to store filconf
+    _512b* ptr = reinterpret_cast<ap_uint<512>*>(FilterConf_HBM[0]);
+    _512b* ptr1 = reinterpret_cast<ap_uint<512>*>(FilterConf_HBM[1]);
+
+    // Assign the first 512 bits (64 bytes) to 'filconf'
+    ptr[0] = filconf;
+    ptr1[0] = filconf;
+
+    // The second 512 bits will store the 'readCnt'. We'll place 'readCnt' in the first 32 bits of this block.
+    _512b readCntBlock = 0;
+    readCntBlock.range(31, 0) = readCnt;
+
+    // Assign the second 512 bits (64 bytes) to 'readCnt'
+    ptr[1] = readCntBlock;
+    ptr1[1] = readCntBlock;
+    // std::cout << "readCnt:  " << readCnt << std::endl;
+
+        
+    ///////////////////////////
+
+    ///////Getting nvme ssd file desc////////
+        auto FileTimeS = std::chrono::steady_clock::now();
+        
+        nvmeFd = open(nvme_file.c_str(), O_RDONLY); // | O_DIRECT | O_SYNC  O_RDONLY  O_RDWR
+        if (nvmeFd < 0) {
+            std::cerr << "ERROR: open " << nvme_file << "failed: " << std::endl;
+            return EXIT_FAILURE;
+        }
+        auto FileTimeE = std::chrono::steady_clock::now();
+        auto FileTime = std::chrono::duration_cast<std::chrono::microseconds>(FileTimeE - FileTimeS);
+        std::cout << "File Opening Time (us):  " << FileTime.count() << std::endl;
+        std::cout << "INFO: Successfully opened NVME SSD1 " << nvme_file << std::endl;
+    ///////////////////////////
     if(FLAGS_bitstream != "") // FLAGS_bitstream != "" : Dont use for hw_emu/csim/sw_emu
     {
         /////////MY HOST///////////
@@ -424,10 +487,13 @@ int main(int argc, char* argv[]) {
             cl::Buffer buffer_in_HBM[BUFFERS_IN];
             cl_mem_ext_ptr_t mIN_HBM[BUFFERS_IN];
 
+            cl::Buffer filConf_in_HBM[BUFFERS_IN];
+            cl_mem_ext_ptr_t mFCIN_HBM[BUFFERS_IN];
+
             cl::Buffer buffer_out_HBM[BUFFERS_OUT];
             cl_mem_ext_ptr_t mOUT_HBM[BUFFERS_OUT];
 
-            //HBM Bank location start from 16
+            //HBM Bank for input is 16:17
             for(uint32_t i = 0; i < BUFFERS_IN; i ++)
             {
                 mIN_HBM[i] = {XCL_MEM_TOPOLOGY | (unsigned int)(i+16), data_in_HBM[i], 0};
@@ -435,51 +501,67 @@ int main(int argc, char* argv[]) {
                                 (size_t)(max_input_size), &mIN_HBM[i], &err);     // CL_MEM_WRITE_ONLY, CL_MEM_READ_ONLY, CL_MEM_READ_WRITE
                 CL_CHECK(err);
             }
+            //Filter Conf
+            for(uint32_t i = 0; i < BUFFERS_IN; i ++)
+            {
+                mFCIN_HBM[i] = {XCL_MEM_TOPOLOGY | (unsigned int)(i), FilterConf_HBM[i], 0};
+                filConf_in_HBM[i] = cl::Buffer(context_, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_READ_WRITE,
+                                (size_t)(192), &mFCIN_HBM[i], &err);     // CL_MEM_WRITE_ONLY, CL_MEM_READ_ONLY, CL_MEM_READ_WRITE
+                CL_CHECK(err);
+            }
 
-            for(int i = 0; i < 8; i++)
+            //output ports
+            for(int i = 0; i < BUFFERS_OUT-4; i++)
             {
                 // (XCL_MEM_TOPOLOGY | memory bank)
-                mOUT_HBM[i] = {XCL_MEM_TOPOLOGY | (unsigned int)(i+2+16), data_out_HBM[i], 0};
+                mOUT_HBM[i] = {XCL_MEM_TOPOLOGY | (unsigned int)(i+2), data_out_HBM[i], 0};
                 buffer_out_HBM[i] = cl::Buffer(context_, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_WRITE_ONLY,
                                 (size_t)(max_output_size), &mOUT_HBM[i], &err);     // CL_MEM_WRITE_ONLY, CL_MEM_READ_ONLY, CL_MEM_READ_WRITE
                 CL_CHECK(err);
             }
 
-            for(int i = 8; i < BUFFERS_OUT; i++)
+            //idx port
+            for(int i = BUFFERS_OUT-4; i < BUFFERS_OUT-2; i++)
             {
                 // (XCL_MEM_TOPOLOGY | memory bank)
-                mOUT_HBM[i] = {XCL_MEM_TOPOLOGY | (unsigned int)(i+2+16), data_out_HBM[i], 0};
+                mOUT_HBM[i] = {XCL_MEM_TOPOLOGY | (unsigned int)(i+2), data_out_HBM[i], 0};
+                buffer_out_HBM[i] = cl::Buffer(context_, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_READ_WRITE,
+                                (size_t)(max_output_size), &mOUT_HBM[i], &err);     // CL_MEM_WRITE_ONLY, CL_MEM_READ_ONLY, CL_MEM_READ_WRITE
+                CL_CHECK(err);
+            }
+            //meta port
+            for(int i = BUFFERS_OUT-2; i < BUFFERS_OUT; i++)
+            {
+                // (XCL_MEM_TOPOLOGY | memory bank)
+                mOUT_HBM[i] = {XCL_MEM_TOPOLOGY | (unsigned int)(i+2), data_out_HBM[i], 0};
                 buffer_out_HBM[i] = cl::Buffer(context_, CL_MEM_EXT_PTR_XILINX | CL_MEM_USE_HOST_PTR | CL_MEM_WRITE_ONLY,
                                 (size_t)(max_track_size), &mOUT_HBM[i], &err);     // CL_MEM_WRITE_ONLY, CL_MEM_READ_ONLY, CL_MEM_READ_WRITE
                 CL_CHECK(err);
             }
 
-            std::cout << "Data in buffer size(MB): " << (max_data_length / (1024.0 * 1024.0)) << std::endl;
-            std::cout << "Data out buffer size(MB): " << (max_output_size / (1024.0 * 1024.0)) << std::endl;
+            std::cout << "Data in buffer size(MB): " << (max_input_size / (1000.0 * 1000.0)) << std::endl;
+            std::cout << "Data out buffer size(MB): " << (max_output_size / (1000.0 * 1000.0)) << std::endl;
 
             cl::Kernel kernelDD;
-            KRNL_file_size_bytes = Data_lengths[0];
-            file_size_rem = KRNL_file_size_bytes%64;
-            if(file_size_rem!=0)
-            {
-                KRNL_file_size_bytes = KRNL_file_size_bytes + (64 - file_size_rem);
-            }
 
-            KRNL_file_size_bytes = (KRNL_file_size_bytes + PIPELINE_DEPTH);  //the pipeline depth of FPGA 64*8=512 + 64 = 576
-            KRNL_file_size_bytes = KRNL_file_size_bytes/64;
+            uint32_t dCount = Data_length / 64;
+            if ((Data_length % 64) != 0) {
+                dCount += 1;
+            }
 
             for (const auto& kvp : kernels_) {
                 int index = kvp.first; // Get the index (key) of the kernel
                 std::cout << "Setting Kernel["<<index<<"] Arg" << std::endl;
                 kernelDD = kvp.second; // Get the kernel associated with the index (key)
                 kernelDD.setArg(0, buffer_in_HBM[0]);
-                kernelDD.setArg(1, buffer_out_HBM[0]);
-                kernelDD.setArg(2, buffer_out_HBM[2]);
-                kernelDD.setArg(3, buffer_out_HBM[4]);
-                kernelDD.setArg(4, buffer_out_HBM[6]);
-                kernelDD.setArg(5, buffer_out_HBM[8]);
-                kernelDD.setArg(6, sizeof(wait_count), &wait_count);
-                kernelDD.setArg(7, sizeof(KRNL_file_size_bytes), &KRNL_file_size_bytes);
+                kernelDD.setArg(1, filConf_in_HBM[0]);
+                kernelDD.setArg(2, buffer_out_HBM[0]);          //data0
+                kernelDD.setArg(3, buffer_out_HBM[2]);          //data1
+                kernelDD.setArg(4, buffer_out_HBM[4]);          //data2
+                kernelDD.setArg(5, buffer_out_HBM[6]);          //data3
+                kernelDD.setArg(6, buffer_out_HBM[8]);          //idx
+                kernelDD.setArg(7, buffer_out_HBM[10]);         //data4(meta)
+                kernelDD.setArg(8, sizeof(dCount), &dCount);
             }
             std::cout << "Kernels Argument Set." << std::endl;
             
@@ -493,7 +575,7 @@ int main(int argc, char* argv[]) {
             memset(data_in_HBM[0], 0, max_input_size);
             memset(data_in_HBM[1], 0, max_input_size);
 
-            async_readnorm(&aio_rf, (void *)(data_in_HBM[0]), nvmeFd, Data_lengths[0], Data_offsets[0]); 
+            async_readnorm(&aio_rf, (void *)(data_in_HBM[0]), nvmeFd, Data_length, Data_offset); 
             while( aio_error(&aio_rf) == EINPROGRESS ) {;}
             ret_aio = aio_return (&aio_rf);
             printf("Bytes Read. %d \n", ret_aio);
@@ -506,13 +588,14 @@ int main(int argc, char* argv[]) {
             std::cout << "C2F Done" << std::endl;
 
             kernelDD.setArg(0, buffer_in_HBM[0]);
-            kernelDD.setArg(1, buffer_out_HBM[0]);
-            kernelDD.setArg(2, buffer_out_HBM[2]);
-            kernelDD.setArg(3, buffer_out_HBM[4]);
-            kernelDD.setArg(4, buffer_out_HBM[6]);
-            kernelDD.setArg(5, buffer_out_HBM[8]);  ///6,7 already set use old
-            kernelDD.setArg(6, sizeof(wait_count), &wait_count);
-            kernelDD.setArg(7, sizeof(KRNL_file_size_bytes), &KRNL_file_size_bytes);
+            kernelDD.setArg(1, filConf_in_HBM[0]);
+            kernelDD.setArg(2, buffer_out_HBM[0]);          //data0
+            kernelDD.setArg(3, buffer_out_HBM[2]);          //data1
+            kernelDD.setArg(4, buffer_out_HBM[4]);          //data2
+            kernelDD.setArg(5, buffer_out_HBM[6]);          //data3
+            kernelDD.setArg(6, buffer_out_HBM[8]);          //idx
+            kernelDD.setArg(7, buffer_out_HBM[10]);         //data4(meta)
+            kernelDD.setArg(8, sizeof(dCount), &dCount);
 
             CL_CHECK(cmd_.flush());
             CL_CHECK(cmd_.finish());
@@ -527,6 +610,8 @@ int main(int argc, char* argv[]) {
             std::cout << "Kernel Done" << std::endl;
 
             //CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED,  CL_MIGRATE_MEM_OBJECT_HOST     
+            CL_CHECK(cmd_.enqueueMigrateMemObjects({(filConf_in_HBM[0])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                                                        &kernel_wait_events, &kernel_events[2]));
             CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[0])}, CL_MIGRATE_MEM_OBJECT_HOST , 
                                                         &kernel_wait_events, &kernel_events[2]));
             CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[2])}, CL_MIGRATE_MEM_OBJECT_HOST , 
@@ -536,6 +621,8 @@ int main(int argc, char* argv[]) {
             CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[6])}, CL_MIGRATE_MEM_OBJECT_HOST , 
                                                         &kernel_wait_events, &kernel_events[2]));
             CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[8])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                                                        &kernel_wait_events, &kernel_events[2]));
+            CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[10])}, CL_MIGRATE_MEM_OBJECT_HOST , 
                                                         &kernel_wait_events, &kernel_events[2]));
 
             CL_CHECK(cmd_.flush());
@@ -564,24 +651,27 @@ int main(int argc, char* argv[]) {
                 store_time_ns = (end - start); //-- actual time is reported in nanoseconds
             ///////////////////////////
         #ifdef PRINT_DEBUG
-            std::cout << "Kernel Exec time(ms): " << (compute_time_ns) * 1e-6 << std::endl;
-            std::cout << "Data Input Size (MB): " << (float)(Data_lengths[0]/(1024.0*1024.0)) << std::endl;
-            std::cout << "Data Output Size (MB): " << (float)((stripe_rows[0]*4)/(1024.0*1024.0)) << std::endl;
-            std::cout << "Kernel throughput(GB/s): " << (float)(Data_lengths[0])/(float)(compute_time_ns) << std::endl;
+            // std::cout << "Kernel Exec time(ms): " << (compute_time_ns) * 1e-6 << std::endl;
+            // std::cout << "Data Input Size (MB): " << (float)(Data_lengths[0]/(1024.0*1024.0)) << std::endl;
+            // std::cout << "Data Output Size (MB): " << (float)((stripe_rows[0]*4)/(1024.0*1024.0)) << std::endl;
+            // std::cout << "Kernel throughput(GB/s): " << (float)(Data_lengths[0])/(float)(compute_time_ns) << std::endl;
 
-            std::cout << "CPU-2-FPGA Transfer time(ms): " << (load_time_ns) * 1e-6 << std::endl;
-            std::cout << "FPGA-2-CPU Transfer time(ms): " << (store_time_ns) * 1e-6 << std::endl;
+            // std::cout << "CPU-2-FPGA Transfer time(ms): " << (load_time_ns) * 1e-6 << std::endl;
+            // std::cout << "FPGA-2-CPU Transfer time(ms): " << (store_time_ns) * 1e-6 << std::endl;
         #endif
         ///////Launching KERNEL DATAFLOW////////
             //non multiple RL adjustment
             // stripeCount -= 833;    //remove stripes
 
-            uint32_t NITERS = stripeCount + 4;  //IO, C2F, FCOMP, F2C, dCopy
+            uint32_t T_ITER = stripeCount*DATA_MUL;
+            uint32_t NITERS = T_ITER + 4;  //IO, C2F, FCOMP, F2C, dCopy
+            
 
             cl_uint one = 1;
             std::vector<cl::Event> C2F_events(NITERS);
+            std::vector<cl::Event> FilC_events(4);
             std::vector<cl::Event> Comp_events(NITERS);
-            std::vector<cl::Event> F2C_events(NITERS*10);
+            std::vector<cl::Event> F2C_events(NITERS*7);
             std::vector<cl::Event> kernel_wait_events0;
             std::vector<cl::Event> kernel_wait_events1;
 
@@ -609,8 +699,23 @@ int main(int argc, char* argv[]) {
             auto tempTimeB = std::chrono::steady_clock::now();
             auto tempTime = std::chrono::duration_cast<std::chrono::microseconds>(tempTimeA - tempTimeB);
 
+            auto C2FTimeS = std::chrono::steady_clock::now();
+            auto C2FTimeE = std::chrono::steady_clock::now();
+            auto C2FTime = std::chrono::duration_cast<std::chrono::microseconds>(asyncTimeE - asyncTimeS);
+
+            auto COMPTimeS = std::chrono::steady_clock::now();
+            auto COMPTimeE = std::chrono::steady_clock::now();
+            auto COMPTime = std::chrono::duration_cast<std::chrono::microseconds>(asyncTimeE - asyncTimeS);
+
+            auto F2CTimeS = std::chrono::steady_clock::now();
+            auto F2CTimeE = std::chrono::steady_clock::now();
+            auto F2CTime = std::chrono::duration_cast<std::chrono::microseconds>(asyncTimeE - asyncTimeS);
+
             double time_dCopy[NITERS] = {0.0F};
             double time_fpga[NITERS] = {0.0F};
+            double time_C2F[NITERS] = {0.0F};
+            double time_COMP[NITERS] = {0.0F};
+            double time_F2C[NITERS] = {0.0F};
             double time_read[NITERS] = {0.0F};
             double time_wr[NITERS] = {0.0F};
             double time_async[NITERS] = {0.0F};
@@ -633,34 +738,43 @@ int main(int argc, char* argv[]) {
                     // std::cout << "ITER COUNT: " << i << std::endl;
                     asyncTimeS = std::chrono::steady_clock::now();
                     //IO READ
-                    if(i < stripeCount)
+                    if(i < T_ITER)
                     {
                         if((i%2) == 0)
                         {
-                            async_readnorm(&aio_rf, (void *)(data_in_HBM[0]), nvmeFd, Data_lengths[i], Data_offsets[i]); 
+                            async_readnorm(&aio_rf, (void *)(data_in_HBM[0]), nvmeFd, Data_length, Data_offset); 
                             // std::cout << "IO_E" << std::endl;
                         }
                         else
                         {
-                            async_readnorm(&aio_rf1, (void *)(data_in_HBM[1]), nvmeFd, Data_lengths[i], Data_offsets[i]); 
+                            async_readnorm(&aio_rf1, (void *)(data_in_HBM[1]), nvmeFd, Data_length, Data_offset); 
                             // std::cout << "IO_O" << std::endl;
                         }
                     }   
 
                     // tempTimeA = std::chrono::steady_clock::now();
                     //CPU_2_FPGA
-                    if((i >= 1) && (i < (stripeCount+1)))
+                    if((i >= 1) && (i < (T_ITER+1)))
                     {
-                        int Ssize = Data_lengths[i-1]+PIPELINE_DEPTH+64;
+                        // int Ssize = Data_lengths[i-1];
                         if(((i-1)%2) == 0)
                         {
-                            CL_CHECK(cmd_.enqueueWriteBuffer(buffer_in_HBM[0], CL_FALSE, 0, Ssize, data_in_HBM[0], nullptr, &C2F_events[i-1]));
+                            CL_CHECK(cmd_.enqueueWriteBuffer(buffer_in_HBM[0], CL_FALSE, 0, Data_length, data_in_HBM[0], nullptr, &C2F_events[i-1]));
+                            if(i==1)
+                            {
+                                CL_CHECK(cmd_.enqueueWriteBuffer(filConf_in_HBM[0], CL_FALSE, 0, 192, FilterConf_HBM[0], nullptr, &FilC_events[i-1]));
+                            }
+                            
                             // cmd_.enqueueMigrateMemObjects({(buffer_in_HBM[0])} , 0 , nullptr, &C2F_events[i-1]);
                             // std::cout << "C2F_E" << std::endl;
                         }
                         else
                         {
-                            CL_CHECK(cmd_.enqueueWriteBuffer(buffer_in_HBM[1], CL_FALSE, 0, Ssize, data_in_HBM[1], nullptr, &C2F_events[i-1]));
+                            CL_CHECK(cmd_.enqueueWriteBuffer(buffer_in_HBM[1], CL_FALSE, 0, Data_length, data_in_HBM[1], nullptr, &C2F_events[i-1]));
+                            if(i==2)
+                            {
+                                CL_CHECK(cmd_.enqueueWriteBuffer(filConf_in_HBM[1], CL_FALSE, 0, 192, FilterConf_HBM[1], nullptr, &FilC_events[i-1]));
+                            }
                             // cmd_.enqueueMigrateMemObjects({(buffer_in_HBM[1])} , 0 , nullptr, &C2F_events[i-1]);
                             // std::cout << "C2F_O" << std::endl;
                         }
@@ -671,28 +785,25 @@ int main(int argc, char* argv[]) {
                     // std::cout << "time_async C2F: " << static_cast<double>(tempTime.count()) <<std::endl;
 
                     //KERNEL CALL
-                    if((i >= 2) && (i < (stripeCount+2)))
+                    if((i >= 2) && (i < (T_ITER+2)))
                     {
-                        KRNL_file_size_bytes = Data_lengths[i-2];
-                        file_size_rem = KRNL_file_size_bytes%64;
-                        if(file_size_rem!=0)
-                        {
-                            KRNL_file_size_bytes = KRNL_file_size_bytes + (64 - file_size_rem);
+                        uint32_t dCount = Data_length / 64;
+                        if ((Data_length % 64) != 0) {
+                            dCount += 1;
                         }
-                        KRNL_file_size_bytes = (KRNL_file_size_bytes + PIPELINE_DEPTH);  //the pipeline depth of FPGA 64*8=512 + 64 = 576
-                        KRNL_file_size_bytes = KRNL_file_size_bytes/64;
 
                         if(((i-2)%2) == 0)
                         {
                             //Set Arg
                                 kernelDD.setArg(0, buffer_in_HBM[0]);
-                                kernelDD.setArg(1, buffer_out_HBM[0]);
-                                kernelDD.setArg(2, buffer_out_HBM[2]);
-                                kernelDD.setArg(3, buffer_out_HBM[4]);
-                                kernelDD.setArg(4, buffer_out_HBM[6]);
-                                kernelDD.setArg(5, buffer_out_HBM[8]);
-                                kernelDD.setArg(6, sizeof(wait_count), &wait_count);
-                                kernelDD.setArg(7, sizeof(KRNL_file_size_bytes), &KRNL_file_size_bytes);
+                                kernelDD.setArg(1, filConf_in_HBM[0]);
+                                kernelDD.setArg(2, buffer_out_HBM[0]);          //data0
+                                kernelDD.setArg(3, buffer_out_HBM[2]);          //data1
+                                kernelDD.setArg(4, buffer_out_HBM[4]);          //data2
+                                kernelDD.setArg(5, buffer_out_HBM[6]);          //data3
+                                kernelDD.setArg(6, buffer_out_HBM[8]);          //idx
+                                kernelDD.setArg(7, buffer_out_HBM[10]);         //data4(meta)
+                                kernelDD.setArg(8, sizeof(dCount), &dCount);
                             //Kernel Call
                                 // std::cout << "COMP_E" << std::endl;
                         }
@@ -700,13 +811,14 @@ int main(int argc, char* argv[]) {
                         {
                             //Set Arg
                                 kernelDD.setArg(0, buffer_in_HBM[1]);
-                                kernelDD.setArg(1, buffer_out_HBM[1]);
-                                kernelDD.setArg(2, buffer_out_HBM[3]);
-                                kernelDD.setArg(3, buffer_out_HBM[5]);
-                                kernelDD.setArg(4, buffer_out_HBM[7]);
-                                kernelDD.setArg(5, buffer_out_HBM[9]);
-                                kernelDD.setArg(6, sizeof(wait_count), &wait_count);
-                                kernelDD.setArg(7, sizeof(KRNL_file_size_bytes), &KRNL_file_size_bytes);
+                                kernelDD.setArg(1, filConf_in_HBM[1]);
+                                kernelDD.setArg(2, buffer_out_HBM[1]);          //data0
+                                kernelDD.setArg(3, buffer_out_HBM[3]);          //data1
+                                kernelDD.setArg(4, buffer_out_HBM[5]);          //data2
+                                kernelDD.setArg(5, buffer_out_HBM[7]);          //data3
+                                kernelDD.setArg(6, buffer_out_HBM[9]);          //idx
+                                kernelDD.setArg(7, buffer_out_HBM[11]);         //data4(meta)
+                                kernelDD.setArg(8, sizeof(dCount), &dCount);
                             //Kernel Call
                                 // std::cout << "COMP_O" << std::endl;
                         }
@@ -715,90 +827,191 @@ int main(int argc, char* argv[]) {
                     }
 
                     //FPGA_2_CPU
-                    if((i >= 3) && (i < (stripeCount+3)))
+                    // if((i >= 3) && (i < (T_ITER+3)))
+                    // {
+                    //     if(((i-3)%2) == 0)
+                    //     {
+                    //         CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[0])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                    //                                         nullptr, &F2C_events[((i-3)*7)+0]));
+                    //         CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[2])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                    //                                         nullptr, &F2C_events[((i-3)*7)+1]));
+                    //         CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[4])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                    //                                         nullptr, &F2C_events[((i-3)*7)+2]));
+                    //         CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[6])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                    //                                         nullptr, &F2C_events[((i-3)*7)+3]));
+                    //         // CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[8])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                    //         //                                 nullptr, &F2C_events[((i-3)*7)+4]));
+                    //         // CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[10])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                    //         //                                 nullptr, &F2C_events[((i-3)*7)+5]));
+                    //         //read filtered Rows Val
+                    //         CL_CHECK(cmd_.enqueueMigrateMemObjects({(filConf_in_HBM[0])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                    //                                         nullptr, &F2C_events[((i-3)*7)+6]));
+                    //         // std::cout << "F2C_E" << std::endl;
+                    //     }
+                    //     else
+                    //     {
+                    //         CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[1])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                    //                                         nullptr, &F2C_events[((i-3)*7)+0]));
+                    //         CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[3])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                    //                                         nullptr, &F2C_events[((i-3)*7)+1]));
+                    //         CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[5])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                    //                                         nullptr, &F2C_events[((i-3)*7)+2]));
+                    //         CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[7])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                    //                                         nullptr, &F2C_events[((i-3)*7)+3]));
+                    //         // CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[9])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                    //         //                                 nullptr, &F2C_events[((i-3)*7)+4]));
+                    //         // CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[11])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                    //         //                                 nullptr, &F2C_events[((i-3)*7)+5]));
+                    //         //read filtered Rows Val
+                    //         CL_CHECK(cmd_.enqueueMigrateMemObjects({(filConf_in_HBM[1])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                    //                                         nullptr, &F2C_events[((i-3)*7)+6]));
+                    //         // std::cout << "F2C_O" << std::endl;
+                    //     }
+
+                    //     // std::cout << "F2C" << ":" << i-3 << std::endl;
+                    // }
+
+                    if((i >= 3) && (i < (T_ITER+3)))
                     {
+                        uint32_t dSizeBytes = 0;
+                        uint32_t tTrack = 0;
+                        // offsetD += dSize_prev;
+                        // offsetT += tTrackSize_prev;
+
                         if(((i-3)%2) == 0)
                         {
-                            CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[0])}, CL_MIGRATE_MEM_OBJECT_HOST , 
-                                                            nullptr, &F2C_events[((i-3)*10)+0]));
-                            CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[2])}, CL_MIGRATE_MEM_OBJECT_HOST , 
-                                                            nullptr, &F2C_events[((i-3)*10)+1]));
-                            CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[4])}, CL_MIGRATE_MEM_OBJECT_HOST , 
-                                                            nullptr, &F2C_events[((i-3)*10)+2]));
-                            CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[6])}, CL_MIGRATE_MEM_OBJECT_HOST , 
-                                                            nullptr, &F2C_events[((i-3)*10)+3]));
-                            CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[8])}, CL_MIGRATE_MEM_OBJECT_HOST , 
-                                                            nullptr, &F2C_events[((i-3)*10)+4]));
+                            //read filtered Rows Val
+                            CL_CHECK(cmd_.enqueueMigrateMemObjects({(filConf_in_HBM[0])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                                                            nullptr, &F2C_events[((i-3)*7)+6]));
+                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*7)+6])));
+
+                            _512b* ptr = reinterpret_cast<ap_uint<512>*>(FilterConf_HBM[0]);
+                            _512b tNum = ptr[2];
+                            int filrows = tNum.range(31,0);
+                            filterRowCount[i-3] = filrows;
+                            uint32_t tRem = filrows%64;    //number not multiple of 64 numbers (16*4).
+                            dSizeBytes = filrows/64;  //count of how many 512b(64bytes) to copy. 
+                            if(tRem != 0)
+                            {
+                                dSizeBytes += 1;     //add one count.
+                            }
+                            dSizeBytes = dSizeBytes*64;       //each 512bit is 64bytes
+
+
+                            CL_CHECK(cmd_.enqueueReadBuffer({(buffer_out_HBM[0])}, CL_FALSE , 0, dSizeBytes, (data_out_HBM[0]),
+                                                            nullptr, &F2C_events[((i-3)*7)+0]));
+                            CL_CHECK(cmd_.enqueueReadBuffer({(buffer_out_HBM[2])}, CL_FALSE , 0, dSizeBytes, (data_out_HBM[2]),
+                                                            nullptr, &F2C_events[((i-3)*7)+1]));
+                            CL_CHECK(cmd_.enqueueReadBuffer({(buffer_out_HBM[4])}, CL_FALSE , 0, dSizeBytes, (data_out_HBM[4]),
+                                                            nullptr, &F2C_events[((i-3)*7)+2]));
+                            CL_CHECK(cmd_.enqueueReadBuffer({(buffer_out_HBM[6])}, CL_FALSE , 0, dSizeBytes, (data_out_HBM[6]),
+                                                            nullptr, &F2C_events[((i-3)*7)+3]));
+                            // CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[8])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                            //                                 nullptr, &F2C_events[((i-3)*7)+4]));
+                            // CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[10])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                            //                                 nullptr, &F2C_events[((i-3)*7)+5]));
+                            //read filtered Rows Val
+                            // CL_CHECK(cmd_.enqueueMigrateMemObjects({(filConf_in_HBM[0])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                            //                                 nullptr, &F2C_events[((i-3)*7)+6]));
                             // std::cout << "F2C_E" << std::endl;
                         }
                         else
                         {
-                            CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[1])}, CL_MIGRATE_MEM_OBJECT_HOST , 
-                                                            nullptr, &F2C_events[((i-3)*10)+5]));
-                            CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[3])}, CL_MIGRATE_MEM_OBJECT_HOST , 
-                                                            nullptr, &F2C_events[((i-3)*10)+6]));
-                            CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[5])}, CL_MIGRATE_MEM_OBJECT_HOST , 
-                                                            nullptr, &F2C_events[((i-3)*10)+7]));
-                            CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[7])}, CL_MIGRATE_MEM_OBJECT_HOST , 
-                                                            nullptr, &F2C_events[((i-3)*10)+8]));
-                            CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[9])}, CL_MIGRATE_MEM_OBJECT_HOST , 
-                                                            nullptr, &F2C_events[((i-3)*10)+9]));
+                            //read filtered Rows Val
+                            CL_CHECK(cmd_.enqueueMigrateMemObjects({(filConf_in_HBM[1])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                                                            nullptr, &F2C_events[((i-3)*7)+6]));
+                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*7)+6])));
+
+
+                            _512b* ptr = reinterpret_cast<ap_uint<512>*>(FilterConf_HBM[1]);
+                            _512b tNum = ptr[2];
+                            int filrows = tNum.range(31,0);
+                            filterRowCount[i-3] = filrows;
+                            uint32_t tRem = filrows%64;    //number not multiple of 64 numbers (16*4).
+                            dSizeBytes = filrows/64;  //count of how many 512b(64bytes) to copy. 
+                            if(tRem != 0)
+                            {
+                                dSizeBytes += 1;     //add one count.
+                            }
+                            dSizeBytes = dSizeBytes*64;       //each 512bit is 64bytes
+
+
+                            CL_CHECK(cmd_.enqueueReadBuffer({(buffer_out_HBM[1])}, CL_FALSE , 0, dSizeBytes, (data_out_HBM[1]),
+                                                            nullptr, &F2C_events[((i-3)*7)+0]));
+                            CL_CHECK(cmd_.enqueueReadBuffer({(buffer_out_HBM[3])}, CL_FALSE , 0, dSizeBytes, (data_out_HBM[3]),
+                                                            nullptr, &F2C_events[((i-3)*7)+1]));
+                            CL_CHECK(cmd_.enqueueReadBuffer({(buffer_out_HBM[5])}, CL_FALSE , 0, dSizeBytes, (data_out_HBM[5]),
+                                                            nullptr, &F2C_events[((i-3)*7)+2]));
+                            CL_CHECK(cmd_.enqueueReadBuffer({(buffer_out_HBM[7])}, CL_FALSE , 0, dSizeBytes, (data_out_HBM[7]),
+                                                            nullptr, &F2C_events[((i-3)*7)+3]));
+                            // CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[9])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                            //                                 nullptr, &F2C_events[((i-3)*7)+4]));
+                            // CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[11])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                            //                                 nullptr, &F2C_events[((i-3)*7)+5]));
+                            
+                            
                             // std::cout << "F2C_O" << std::endl;
                         }
+
+                        // dSize_prev = dSizeBytes;
+                        // tTrackSize_prev = tTrack;
 
                         // std::cout << "F2C" << ":" << i-3 << std::endl;
                     }
 
                     //Data Copy Calls
-                    if((i >= 4) && (i < (stripeCount+4)))
+                    if((i >= 4) && (i < (T_ITER+4)))
                     {
-                        uint32_t dRow = stripe_rows[i-4];
-                        // uint32_t tTrack = (uint32_t)((float)(dRow) * 1.17);
-                        uint32_t tTrack = dRow *1;
-                        uint32_t tRem = tTrack%16;  //128bit is 16bytes
-                        if(tRem != 0)
-                        {
-                            tTrack += (16 - tRem);
-                        }
-
-                        // std::cout << "dRow: " << dRow << std::endl;
-                        // std::cout << "tTrack: " << tTrack << std::endl;
-                        
+                        uint32_t dSizeBytes = 0;
+                        uint32_t tTrack = 0;
                         offsetD += dSize_prev;
                         offsetT += tTrackSize_prev;
-
-                        // std::cout << "offsetD: " << offsetD << std::endl;
-                        // std::cout << "offsetT: " << offsetT << std::endl;
-
-                        if (((i - 4) % 2) == 0) {
+                        int filrows = filterRowCount[i-4];
+                        uint32_t tRem = filrows%64;    //number not multiple of 64 numbers (16*4).
+                        dSizeBytes = filrows/64;  //count of how many 512b(64bytes) to copy. 
+                        if(tRem != 0)
+                        {
+                            dSizeBytes += 1;     //add one count.
+                        }
+                        dSizeBytes = dSizeBytes*64;       //each 512bit is 64bytes
+                        // tTrack = dSizeBytes*1.2;
+                        // tRem = tTrack%16;  //128bit is 16bytes
+                        // if(tRem != 0)
+                        // {
+                        //     tTrack += (16 - tRem);
+                        // }
+                        if (((i - 4) % 2) == 0) {                            
                             // Launch threads with offset handling
-                            t1 = std::thread(copy_data, data_out_HBM[0], dataOut[0], dRow, offsetD);
-                            t2 = std::thread(copy_data, data_out_HBM[2], dataOut[1], dRow, offsetD);
-                            t3 = std::thread(copy_data, data_out_HBM[4], dataOut[2], dRow, offsetD);
-                            t4 = std::thread(copy_data, data_out_HBM[6], dataOut[3], dRow, offsetD);
-                            t5 = std::thread(copy_data, data_out_HBM[8], trackOut, tTrack, offsetT);
+                            t1 = std::thread(copy_data, data_out_HBM[0], dataOut[0], dSizeBytes, offsetD);
+                            t2 = std::thread(copy_data, data_out_HBM[2], dataOut[1], dSizeBytes, offsetD);
+                            t3 = std::thread(copy_data, data_out_HBM[4], dataOut[2], dSizeBytes, offsetD);
+                            t4 = std::thread(copy_data, data_out_HBM[6], dataOut[3], dSizeBytes, offsetD);
+                            // t5 = std::thread(copy_data, data_out_HBM[10], trackOut, tTrack, offsetT);
                         } else {
                             // Launch threads with offset handling
-                            t1 = std::thread(copy_data, data_out_HBM[1], dataOut[0], dRow, offsetD);
-                            t2 = std::thread(copy_data, data_out_HBM[3], dataOut[1], dRow, offsetD);
-                            t3 = std::thread(copy_data, data_out_HBM[5], dataOut[2], dRow, offsetD);
-                            t4 = std::thread(copy_data, data_out_HBM[7], dataOut[3], dRow, offsetD);
-                            t5 = std::thread(copy_data, data_out_HBM[9], trackOut, tTrack, offsetT);
+                            t1 = std::thread(copy_data, data_out_HBM[1], dataOut[0], dSizeBytes, offsetD);
+                            t2 = std::thread(copy_data, data_out_HBM[3], dataOut[1], dSizeBytes, offsetD);
+                            t3 = std::thread(copy_data, data_out_HBM[5], dataOut[2], dSizeBytes, offsetD);
+                            t4 = std::thread(copy_data, data_out_HBM[7], dataOut[3], dSizeBytes, offsetD);
+                            // t5 = std::thread(copy_data, data_out_HBM[11], trackOut, tTrack, offsetT);
                         }
 
-                        dSize_prev = dRow;
+                        dSize_prev = dSizeBytes;
                         tTrackSize_prev = tTrack;
 
+                        // std::cout << "D_COPY" << ":" << i-4 << std::endl;
                     }
+
+
                     asyncTimeE = std::chrono::steady_clock::now();
-                    asyncTime = std::chrono::duration_cast<std::chrono::microseconds>(asyncTimeE - asyncTimeS);
-                    time_async[i] = static_cast<double>(asyncTime.count());
+                    // asyncTime = std::chrono::duration_cast<std::chrono::microseconds>(asyncTimeE - asyncTimeS);
+                    // time_async[i] = static_cast<double>(asyncTime.count());
 
                     ///WAITS///
                     
                     //IO READ
                     readTimeS = std::chrono::steady_clock::now();
-                    if(i < stripeCount)
+                    if(i < T_ITER)
                     {
                         int ret = 0;
                         if(i%2 == 0)
@@ -809,9 +1022,10 @@ int main(int argc, char* argv[]) {
                             {
                                 std::cerr << "Read Error. Bytes Read: " << ret << std::endl;
                             }
-                            readTimeE = std::chrono::steady_clock::now();
-                            wrTimeS = std::chrono::steady_clock::now();
-                            writeZeros(data_in_HBM[0], Data_lengths[i], PIPELINE_DEPTH);
+                            // readTimeE = std::chrono::steady_clock::now();
+                            // wrTimeS = std::chrono::steady_clock::now();
+                            // memset(data_in_HBM[0], 0, max_input_size);
+                            // writeZeros(data_in_HBM[0], Data_lengths[i], PIPELINE_DEPTH);
                         }
                         else
                         {
@@ -821,90 +1035,109 @@ int main(int argc, char* argv[]) {
                             {
                                 std::cerr << "Read Error. Bytes Read: " << ret << std::endl;
                             }
-                            readTimeE = std::chrono::steady_clock::now();
-                            wrTimeS = std::chrono::steady_clock::now();
-                            writeZeros(data_in_HBM[1], Data_lengths[i], PIPELINE_DEPTH);
+                            // readTimeE = std::chrono::steady_clock::now();
+                            // wrTimeS = std::chrono::steady_clock::now();
+                            // memset(data_in_HBM[1], 0, max_input_size);
+                            // writeZeros(data_in_HBM[1], Data_lengths[i], PIPELINE_DEPTH);
                         }
                         // std::cout << "Read Bytes: " << ret << std::endl;
                     }   
-                    // readTimeE = std::chrono::steady_clock::now();
-                    wrTimeE = std::chrono::steady_clock::now();
-                    wrTime = std::chrono::duration_cast<std::chrono::microseconds>(wrTimeE - wrTimeS);
-                    readTime = std::chrono::duration_cast<std::chrono::microseconds>(readTimeE - readTimeS);
-                    time_read[i] = static_cast<double>(readTime.count());
-                    time_wr[i] = static_cast<double>(wrTime.count());
+                    readTimeE = std::chrono::steady_clock::now();
+                    // wrTimeE = std::chrono::steady_clock::now();
+                    // wrTime = std::chrono::duration_cast<std::chrono::microseconds>(wrTimeE - wrTimeS);
+                    // readTime = std::chrono::duration_cast<std::chrono::microseconds>(readTimeE - readTimeS);
+                    // time_read[i] = static_cast<double>(readTime.count());
+                    // time_wr[i] = static_cast<double>(wrTime.count());
 
-                    FPGATimeS = std::chrono::steady_clock::now();
+                    // FPGATimeS = std::chrono::steady_clock::now();
+                    C2FTimeS = std::chrono::steady_clock::now();
                     //CPU_2_FPGA
-                    if((i >= 1) && (i < (stripeCount+1)))
+                    if((i >= 1) && (i < (T_ITER+1)))
                     {
                         CL_CHECK(clWaitForEvents(one,(cl_event*)(&C2F_events[i-1])));
+                        if(i < 3)
+                        {
+                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&FilC_events[i-1])));
+                        }
                         // std::cout << "C2F Wait" << ":" << i-1 << std::endl;
                     }                    
+                    C2FTimeE = std::chrono::steady_clock::now();
+                    // C2FTime = std::chrono::duration_cast<std::chrono::microseconds>(C2FTimeE - C2FTimeS);
+                    // time_C2F[i] = static_cast<double>(C2FTime.count());
                     
+                    COMPTimeS = std::chrono::steady_clock::now();
                     //KERNEL CALL
-                    if((i >= 2) && (i < (stripeCount+2)))
+                    if((i >= 2) && (i < (T_ITER+2)))
                     {
                         CL_CHECK(clWaitForEvents(one,(cl_event*)(&Comp_events[i-2])));
                         // std::cout << "COMP Wait" <<":" << i-2 << std::endl;
                     }
+                    COMPTimeE = std::chrono::steady_clock::now();
+                    // COMPTime = std::chrono::duration_cast<std::chrono::microseconds>(COMPTimeE - COMPTimeS);
+                    // time_COMP[i] = static_cast<double>(COMPTime.count());
 
+                    F2CTimeS = std::chrono::steady_clock::now();
                     //FPGA_2_CPU
-                    if((i >= 3) && (i < (stripeCount+3)))
+                    if((i >= 3) && (i < (T_ITER+3)))
                     {
                         if(((i-3)%2) == 0)
                         {
-                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+0])));
-                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+1])));
-                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+2])));
-                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+3])));
-                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+4])));
+                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*7)+0])));
+                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*7)+1])));
+                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*7)+2])));
+                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*7)+3])));
+                            // CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*7)+4])));        //data idx
+                            // CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*7)+5])));        //meta
                         }
                         else
                         {
-                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+5])));
-                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+6])));
-                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+7])));
-                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+8])));
-                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*10)+9])));
+                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*7)+0])));
+                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*7)+1])));
+                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*7)+2])));
+                            CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*7)+3])));
+                            // CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*7)+4])));        //data idx
+                            // CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i-3)*7)+5])));        //meta
                         }
                         // std::cout << "F2C Wait" << ":" << i-3 << std::endl;
                     }
-                    FPGATimeE = std::chrono::steady_clock::now();
-                    FPGATime = std::chrono::duration_cast<std::chrono::microseconds>(FPGATimeE - FPGATimeS);
-                    time_fpga[i] = static_cast<double>(FPGATime.count());
+                    // FPGATimeE = std::chrono::steady_clock::now();
+                    // FPGATime = std::chrono::duration_cast<std::chrono::microseconds>(FPGATimeE - FPGATimeS);
+                    // time_fpga[i] = static_cast<double>(FPGATime.count());
+                    F2CTimeE = std::chrono::steady_clock::now();
+                    // F2CTime = std::chrono::duration_cast<std::chrono::microseconds>(F2CTimeE - F2CTimeS);
+                    // time_F2C[i] = static_cast<double>(F2CTime.count());
 
 
                     //dataCopy
                     dCopyTimeS = std::chrono::steady_clock::now();
-                    if((i >= 4) && (i < (stripeCount+4)))
+                    if((i >= 4) && (i < (T_ITER+4)))
                     {
                         // Wait for all threads to finish
                         t1.join();
                         t2.join();
                         t3.join();
                         t4.join();
-                        t5.join();
+                        // t5.join();
+                        // std::cout << "D_COPY wait" << ":" << i-4 << std::endl;
                     }
                     dCopyTimeE = std::chrono::steady_clock::now();
-                    dCopyTime = std::chrono::duration_cast<std::chrono::microseconds>(dCopyTimeE - dCopyTimeS);
-                    time_dCopy[i] = static_cast<double>(FPGATime.count());
+                    // dCopyTime = std::chrono::duration_cast<std::chrono::microseconds>(dCopyTimeE - dCopyTimeS);
+                    // time_dCopy[i] = static_cast<double>(dCopyTime.count());
                 }
             }
             else
             {
                 std::cout << "***Sequential Implementation***" << std::endl;
                 dfstart = std::chrono::steady_clock::now();
-                for (int i = 0; i < stripeCount; i++)
+                for (int i = 0; i < T_ITER; i++)
                 {
                     std::cout << "ITER COUNT: " << i << std::endl;
                     //IO READ
                     memset(data_in_HBM[0], 0, max_input_size);
-                    async_readnorm(&aio_rf, (void *)(data_in_HBM[0]), nvmeFd, Data_lengths[i], Data_offsets[i]);  
+                    async_readnorm(&aio_rf, (void *)(data_in_HBM[0]), nvmeFd, Data_length, Data_offset);  
 
-                    std::cout << "Data_lengths[i]: " << Data_lengths[i] << std::endl;
-                    std::cout << "Data_offsets[i]: " << Data_offsets[i] << std::endl;
-
+                    std::cout << "Data_length: " << Data_length << std::endl;
+                    std::cout << "Data_offset: " << Data_offset << std::endl;
 
                     while( aio_error(&aio_rf) == EINPROGRESS ) {;}
                     int ret = aio_return (&aio_rf);
@@ -918,53 +1151,71 @@ int main(int argc, char* argv[]) {
                     }
 
                     //CPU_2_FPGA
-                    int Ssize = Data_lengths[i]+PIPELINE_DEPTH+64;
+                    int Ssize = Data_length;
                     CL_CHECK(cmd_.enqueueWriteBuffer(buffer_in_HBM[0], CL_FALSE, 0, Ssize, data_in_HBM[0], nullptr, &C2F_events[i]));
+                    CL_CHECK(cmd_.enqueueWriteBuffer(filConf_in_HBM[0], CL_FALSE, 0, 192, FilterConf_HBM[0], nullptr, &FilC_events[0]));
                     CL_CHECK(clWaitForEvents(one,(cl_event*)(&C2F_events[i])));
-
+                    CL_CHECK(clWaitForEvents(one,(cl_event*)(&FilC_events[0])));
                     //KERNEL CALL
-                    KRNL_file_size_bytes = Data_lengths[i];
-                    file_size_rem = KRNL_file_size_bytes%64;
-                    if(file_size_rem!=0)
-                    {
-                        KRNL_file_size_bytes = KRNL_file_size_bytes + (64 - file_size_rem);
+                    uint32_t dCount = Data_length / 64;
+                    if ((Data_length % 64) != 0) {
+                        dCount += 1;
                     }
-                    KRNL_file_size_bytes = (KRNL_file_size_bytes + PIPELINE_DEPTH);  //the pipeline depth of FPGA 64*8=512 + 64 = 576
-                    KRNL_file_size_bytes = KRNL_file_size_bytes/64;
                     kernelDD.setArg(0, buffer_in_HBM[0]);
-                    kernelDD.setArg(1, buffer_out_HBM[0]);
-                    kernelDD.setArg(2, buffer_out_HBM[2]);
-                    kernelDD.setArg(3, buffer_out_HBM[4]);
-                    kernelDD.setArg(4, buffer_out_HBM[6]);
-                    kernelDD.setArg(5, buffer_out_HBM[8]);
-                    kernelDD.setArg(6, sizeof(wait_count), &wait_count);
-                    kernelDD.setArg(7, sizeof(KRNL_file_size_bytes), &KRNL_file_size_bytes);
+                    kernelDD.setArg(1, filConf_in_HBM[0]);
+                    kernelDD.setArg(2, buffer_out_HBM[0]);          //data0
+                    kernelDD.setArg(3, buffer_out_HBM[2]);          //data1
+                    kernelDD.setArg(4, buffer_out_HBM[4]);          //data2
+                    kernelDD.setArg(5, buffer_out_HBM[6]);          //data3
+                    kernelDD.setArg(6, buffer_out_HBM[8]);          //idx
+                    kernelDD.setArg(7, buffer_out_HBM[10]);         //data4(meta)
+                    kernelDD.setArg(8, sizeof(dCount), &dCount);
                     CL_CHECK(cmd_.enqueueTask(kernelDD, nullptr, &Comp_events[i]));
                     CL_CHECK(clWaitForEvents(one,(cl_event*)(&Comp_events[i])));
 
 
                     //FPGA_2_CPU
                     CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[0])}, CL_MIGRATE_MEM_OBJECT_HOST , 
-                                                    nullptr, &F2C_events[((i)*10)+0]));
+                                                    nullptr, &F2C_events[i]));
                     CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[2])}, CL_MIGRATE_MEM_OBJECT_HOST , 
-                                                    nullptr, &F2C_events[((i)*10)+1]));
+                                                    nullptr, &F2C_events[i+1]));
                     CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[4])}, CL_MIGRATE_MEM_OBJECT_HOST , 
-                                                    nullptr, &F2C_events[((i)*10)+2]));
+                                                    nullptr, &F2C_events[i+2]));
                     CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[6])}, CL_MIGRATE_MEM_OBJECT_HOST , 
-                                                    nullptr, &F2C_events[((i)*10)+3]));
+                                                    nullptr, &F2C_events[i+3]));
                     CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[8])}, CL_MIGRATE_MEM_OBJECT_HOST , 
-                                                    nullptr, &F2C_events[((i)*10)+4]));
+                                                    nullptr, &F2C_events[i+4]));
+                    CL_CHECK(cmd_.enqueueMigrateMemObjects({(buffer_out_HBM[10])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                                                    nullptr, &F2C_events[i+5]));
 
-                    CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i)*10)+0])));
-                    CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i)*10)+1])));
-                    CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i)*10)+2])));
-                    CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i)*10)+3])));
-                    CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[((i)*10)+4])));
+                    CL_CHECK(cmd_.enqueueMigrateMemObjects({(filConf_in_HBM[0])}, CL_MIGRATE_MEM_OBJECT_HOST , 
+                                                    nullptr, &F2C_events[i+6]));
+
+                    CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[i])));
+                    CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[i+1])));
+                    CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[i+2])));
+                    CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[i+3])));
+                    CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[i+4])));
+                    CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[i+5])));
+                    CL_CHECK(clWaitForEvents(one,(cl_event*)(&F2C_events[i+6])));
+
+                    _512b* ptr = reinterpret_cast<ap_uint<512>*>(FilterConf_HBM[0]);
+                    _512b tNum = ptr[2];
+                    int filrows = tNum.range(31,0);
+                    filterRowCount[i] = filrows;
+                    std::cout << "Total Numbers after Filteration: " << filterRowCount[i] << std::endl;
 
                     //data Copy
-                    uint32_t dSize = stripe_rows[i];
-                    uint32_t tTrackSize = dSize *1;
-                    uint32_t tRem = tTrackSize%16;  //128bit is 16bytes
+                    uint32_t dSize = filterRowCount[i];
+                    uint32_t tRem = dSize%64;    //number not multiple of 64 numbers (16*4).
+                    dSize = dSize/64;  //count of how many 512b(64bytes) to copy. 
+                    if(tRem != 0)
+                    {
+                        dSize += 1;     //add one count.
+                    }
+                    dSize = dSize*64;       //each 512bit is 64bytes
+                    uint32_t tTrackSize = dSize *1.2;
+                    tRem = tTrackSize%16;  //128bit is 16bytes
                     if(tRem != 0)
                     {
                         tTrackSize += (16 - tRem);
@@ -993,8 +1244,13 @@ int main(int argc, char* argv[]) {
                     dSize_prev = dSize;
                     tTrackSize_prev = tTrackSize;
 
-                    // print_data(data_out_HBM[0], data_out_HBM[2], data_out_HBM[4], data_out_HBM[6], dSize, 0);
-                    // print_data(dataOut[0], dataOut[1], dataOut[2], dataOut[3], dSize, offsetD);
+                    // print_data(data_out_HBM[0], data_out_HBM[2], data_out_HBM[4], data_out_HBM[6], filterRowCount[i], 0);
+                    // print_data(dataOut[0], dataOut[1], dataOut[2], dataOut[3], filterRowCount[i], offsetD);
+                    // if(i > 1)
+                    // {
+                    //     print_data(dataOut[0], dataOut[1], dataOut[2], dataOut[3], filterRowCount[i], 0);
+                    // }
+                    
 
                     
                 }
@@ -1006,61 +1262,132 @@ int main(int argc, char* argv[]) {
 
             (void)close(nvmeFd);
 
-            if(dataVerif)
+            if(FLAGS_VERIF)
             {
-                //Data Verification
-                verif_all(reinterpret_cast<int32_t*>(dataOut[0]), 
-                        reinterpret_cast<int32_t*>(dataOut[1]), 
-                        reinterpret_cast<int32_t*>(dataOut[2]), 
-                        reinterpret_cast<int32_t*>(dataOut[3]), 
-                        reinterpret_cast<int32_t*>(trackOut), 
-                        nrows, 
-                        stripe_rows.data(),
-                        stripeCount);
+                std::cout << "Starting Data verif" << std::endl;
+                int kernel_dout = 0;
+                ap_uint<AXI_WIDTH> buf_out = 0;
+                std::vector<int32_t> combinedData;
 
-                print_Fdata(dataOut[0], dataOut[1], dataOut[2], dataOut[3], stripe_rows.data(), stripeCount);
+                int32_t* mData[4];
+
+                mData[0] = reinterpret_cast<int32_t*>(dataOut[0]);
+                mData[1] = reinterpret_cast<int32_t*>(dataOut[1]);
+                mData[2] = reinterpret_cast<int32_t*>(dataOut[2]);
+                mData[3] = reinterpret_cast<int32_t*>(dataOut[3]);
+
+                // update_patch_data(reinterpret_cast<int32_t*>(dataOut[0]), 
+                //             reinterpret_cast<int32_t*>(dataOut[1]), 
+                //             reinterpret_cast<int32_t*>(dataOut[2]), 
+                //             reinterpret_cast<int32_t*>(dataOut[3]),
+                //             reinterpret_cast<int32_t*>(trackOut)
+                //             );
+                
+                //combine data 
+                for(int j = 0; j < T_ITER; j++)
+                {
+                    uint32_t remDiv = filterRowCount[j]%64;
+                    uint64_t dOut_Size_A = filterRowCount[j]/64;   //I THINK ITS SOLVED FOR SR NOW.bcz of short repeat. else its nrows/16. One 512 can worst case contain 3 numbers.
+                    if(remDiv!=0)
+                    {
+                        dOut_Size_A += 1;
+                    }
+                    // dOut_Size_A = dOut_Size_A*4;
+                    std::cout << "dOut_Size_A:  " << dOut_Size_A << std::endl;
+
+                    for(int i = 0; i < (dOut_Size_A); i ++)
+                    {
+                        for(int k = 0; k < 4; k++)
+                        {
+                            for(int z = 0; z < 16; z++)
+                            {
+                                kernel_dout = mData[k][(i*16)+z];
+                                // std::cout << "kernel_dout: " << kernel_dout << std::endl;
+                                combinedData.push_back(kernel_dout);
+                            }
+                        }   
+                    }
+                }
+                // Sort the combined data in descending order
+                // std::sort(combinedData.begin(), combinedData.end());    //for ascending order
+                // std::sort(combinedData.begin(), combinedData.end(), std::greater<int32_t>());
+                
+                //Print out the data
+                // for (const auto& element : combinedData) {
+                //     std::cout << element << std::endl;
+                // }
+                std::cout << "Join Done" << std::endl;
+                verif_sorted(combinedData, filterRowCount);
+                // processFlags(Data_Index);
             }
+
 
             ////PROFILING RESULTS////
             std::cout << std::dec << "----CPU TIMER BASED CALCULATIONS----" << std::endl;
-            std::cout << "TOTAL ITERATION COUNT: " << stripeCount << std::endl;
+            std::cout << "TOTAL ITERATION COUNT: " << stripeCount*DATA_MUL << std::endl;
             std::cout << "END 2 END exec Total Time (ns): " << total_time << std::endl;
-            float total_read = 0.0;
+            double total_read = 0.0;
             
             #ifdef PRINT_DEBUG
                 if(dataflow && (NITERS < 20))
                 {
                     for (int s = 0; s < NITERS; s++)
                     {
-                        // total_read += time_async[s];
-                        // total_read += time_read[s];
+                        total_read += time_async[s];
+                        total_read += time_read[s];
+                        total_read += time_C2F[s];
+                        total_read += time_COMP[s];
+                        total_read += time_F2C[s];
                         // total_read += time_fpga[s];
-                        // total_read += time_fpga[s];
-                        // total_read += time_dCopy[s];
+                        total_read += time_dCopy[s];
                         
                         std::cout << std::dec << "Total Async Call[" <<s<< "] Time (us): " << time_async[s] << std::endl;
-                        if(s < stripeCount)
-                        {
-                            std::cout << std::dec << "Total Read[" <<s<< "] Time (us): " << time_read[s] << std::endl;
-                            std::cout << std::dec << "Total Write0s[" <<s<< "] Time (us): " << time_wr[s] << std::endl;
-                        }
-                        std::cout << std::dec << "Total FPGA[" <<s<< "] Time (us): " << time_fpga[s] << std::endl;
+                        // if(s < stripeCount)
+                        // {
+                        std::cout << std::dec << "Total Read[" <<s<< "] Time (us): " << time_read[s] << std::endl;
+                            // std::cout << std::dec << "Total Write0s[" <<s<< "] Time (us): " << time_wr[s] << std::endl;
+                        // }
+                        // std::cout << std::dec << "Total FPGA[" <<s<< "] Time (us): " << time_fpga[s] << std::endl;
+                        std::cout << std::dec << "Total C2F[" <<s<< "] Time (us): " << time_C2F[s] << std::endl;
+                        std::cout << std::dec << "Total COMP[" <<s<< "] Time (us): " << time_COMP[s] << std::endl;
+                        std::cout << std::dec << "Total F2C[" <<s<< "] Time (us): " << time_F2C[s] << std::endl;
                         std::cout << std::dec << "Total dCopy[" <<s<< "] Time (us): " << time_dCopy[s] << std::endl;
                     }
-                    // std::cout << std::dec << "Total Read Sum(us): " << total_read << std::endl;
+                    std::cout << std::dec << "Total Read Sum(us): " << total_read << std::endl;
                 }
             #endif
 
-            std::cout << std::dec << "Encoded Data File Size(MB): " << ((float)(total_data_length)/(float)(1024.0*1024.0)) << std::endl;
-            std::cout << std::dec << "Total Output Size(MB): " << ((float)((nrows)*4)/(float)(1024.0*1024.0)) << std::endl;
-            std::cout << std::dec << "BANDWIDTH INPUT (GB/s): " << ((double)(total_data_length))/(double)(total_time) << std::endl;
-            std::cout << std::dec << "BANDWIDTH OUTPUT (GB/s): " << ((double)((nrows)*4))/(double)(total_time) << std::endl;
+            double totalOutputSize = 0;
+            for(int i = 0; i < T_ITER; i++)
+            {
+                totalOutputSize += filterRowCount[i];
+            }
+            totalOutputSize = totalOutputSize * 4; //BYTES
+
+            std::cout << std::dec << "Compressed Data File Size(MB): " << ((double)(Data_length*DATA_MUL)/(double)(1000.0*1000.0)) << std::endl;
+            std::cout << std::dec << "Total Output Size(MB): " << (totalOutputSize/1000.0*1000.0) << std::endl;
+
+            #ifdef PRINT_DEBUG
+                std::cout << std::dec << "BANDWIDTH INPUT(trtime) (MB/s): " << (((double)(Data_length*DATA_MUL))/total_read) << std::endl;
+                std::cout << std::dec << "BANDWIDTH OUTPUT(trtime) (MB/s): " << (totalOutputSize/total_read)<< std::endl;
+                std::cout << std::dec << "BANDWIDTH INPUT (MB/s): " << (((double)(Data_length*DATA_MUL))/total_time)*1000.0 << std::endl;
+                std::cout << std::dec << "BANDWIDTH OUTPUT (MB/s): " << (totalOutputSize/total_time)*1000.0 << std::endl;
+            #else
+                std::cout << std::dec << "BANDWIDTH INPUT (MB/s): " << (((double)(Data_length*DATA_MUL))/total_time)*1000.0 << std::endl;
+                std::cout << std::dec << "BANDWIDTH OUTPUT (MB/s): " << (totalOutputSize/total_time)*1000.0 << std::endl;
+            #endif
+            
         
         
         // After using the buffers, free the allocated memory
         for(int i = 0; i < BUFFERS_IN; i++) {
             free(data_in_HBM[i]);
         }
+
+        for(int i = 0; i < BUFFERS_IN; i++) {
+            free(FilterConf_HBM[i]);
+        }
+
 
         for (int i = 0; i < BUFFERS_OUT; ++i) {
             free(data_out_HBM[i]);
@@ -1082,208 +1409,86 @@ int main(int argc, char* argv[]) {
     return 0;
 }
 
-int verif_all(int32_t *datain0, int32_t *datain1, int32_t *datain2, int32_t *datain3, int32_t *track, uint32_t nrows, uint32_t *stripe_rows, uint32_t stripeCount)
+void verif_sorted(std::vector<int32_t> combinedData, uint32_t* FilRows)
 {
-    int64_t kernel_dout = 0;
-    ap_int<AXI_WIDTH> buf_out0 = 0;
-    ap_int<AXI_WIDTH> buf_out1 = 0;
-    ap_int<AXI_WIDTH> buf_out2 = 0;
-    ap_int<AXI_WIDTH> buf_out3 = 0;
-
-    ap_int<AXI_WIDTH> *Data_Out0;
-    Data_Out0 = (ap_int<AXI_WIDTH>*)(datain0);
-
-    ap_int<AXI_WIDTH> *Data_Out1;
-    Data_Out1 = (ap_int<AXI_WIDTH>*)(datain1);
-
-    ap_int<AXI_WIDTH> *Data_Out2;
-    Data_Out2 = (ap_int<AXI_WIDTH>*)(datain2);
-
-    ap_int<AXI_WIDTH> *Data_Out3;
-    Data_Out3 = (ap_int<AXI_WIDTH>*)(datain3);
-
-    _128b *mTr;
-    mTr = (_128b*)(track);
-
-    std::ifstream in_file(check_file);
+    std::ifstream in_file(FLAGS_orig);
 
     if (!in_file) {
-        std::cerr << "Error: failed to open input file." << std::endl;
-        return -1;
+        throw std::runtime_error("Error: failed to open input file.");
     }
 
-    std::string line;
-    int j = 0;
-    int n = 0;
-    int d0_iter = 0;
-    int d1_iter = 0;
-    int d2_iter = 0;
-    int d3_iter = 0;
-    uint32_t tRun = 0;
+    int number;
+    int rowIndex = 0;
+    int numMatched = 0;
+    int T_NUM = 0;
+    bool oneT = true;
 
-    uint32_t batch = 0;
-
-    uint16_t decType = 0;
-    uint16_t runLength = 0;
-    uint8_t PLL = 0;
-    int64_t number = 0;
-    uint32_t tRows = 0;
-    uint32_t trCount = 0;
-    uint32_t stripeCnt = 0;
-
-    while((n < nrows) && (stripeCnt < stripeCount))
+    for(int i = 0; i < DATA_MUL; i++)
     {
 
-        //metaData size read limit
-        uint32_t dRow = stripe_rows[stripeCnt];
-        tRows += dRow;
-        uint32_t trackSize = dRow*1;
-        uint32_t tRem = trackSize%16;
-        if(tRem!=0)
-        {
-            trackSize += (16-tRem);
+        while (in_file >> number) {
+            // std::cout << "number: " << number << std::endl;
+            // if (rowIndex >= FilRows[i]) {
+            //     // throw std::runtime_error("Error: File contains more numbers than expected rows.");
+            //     std::cout << "Error: File contains more numbers than expected rows." << std::endl;
+            // }
+
+            if (number != combinedData[rowIndex]) {
+                throw std::runtime_error("Error: Data mismatch at index " + std::to_string(rowIndex + 1) +
+                                        ". FPGA: " + std::to_string(combinedData[rowIndex]) +
+                                        ", Actual: " + std::to_string(number));
+            }
+            ++numMatched;
+            ++rowIndex;
         }
-        trackSize = trackSize/16;       //total track count for mTr array 128/8=16
-
-        std::cout << "dRow: " << dRow << std::endl;
-        std::cout << "trackSize: " << trackSize << std::endl;
-
-        while(trCount < trackSize)
+        in_file.clear();  // Clear EOF or any other error flags
+        in_file.seekg(0, std::ios::beg);  // Move the pointer back to the beginning of the file
+        //row idx to waste if filter is not multiple of 64.
+        T_NUM += FilRows[i];
+        // std::cout << "FilRows[i]: " << FilRows[i] << std::endl;
+        // std::cout << "Before rowIndex: " << rowIndex << std::endl;
+        uint32_t RCount = FilRows[i]/64;
+        uint32_t remRows = (FilRows[i]%64);
+        if(remRows!=0)
         {
-            j = 0;
-            batch = 0;
+            RCount+=1;
+        }
+        RCount = RCount*64;
+        RCount = RCount*(i+1);
+        rowIndex+=(RCount-rowIndex);
 
-            PLL = mTr->range(7,0);      //8
-            decType = mTr->range(71,64);  //8
-            runLength = mTr->range(95,80);    //16
-
-            // std::cout << "PLL: " << (uint16_t)(PLL) << std::endl;
-            // std::cout << "decType: " << (uint16_t)(decType) << std::endl;
-            // std::cout << "runLength: " << (uint16_t)(runLength) << std::endl;
-            // mTr++;
-
-            if((runLength != 0) && (n < tRows))
+        
+        // std::cout << "After rowIndex: " << rowIndex << std::endl;
+        
+        if(FilRows[i] != (numMatched/(i+1)))
+        {
+            if(oneT)
             {
-                if(PLL!=0)
-                {
-                    mTr++;
-                    trCount++;
-                }
-                else
-                {
-                    if(runLength <= 64)
-                    {
-                        tRun = runLength;
-                    }
-                    else
-                    {
-                        tRun = 64;
-                    }
-
-                    while ((batch < tRun) && (n < tRows))
-                    {
-                        std::getline(in_file, line);
-                        // Clean up line by removing whitespace
-                        line.erase(std::remove_if(line.begin(), line.end(), ::isspace), line.end());
-
-                        if(j == 0)
-                        {
-                            buf_out0 = Data_Out0[d0_iter];       //Data_Out_Check
-                            buf_out1 = Data_Out1[d1_iter];       //Data_Out_Check
-                            buf_out2 = Data_Out2[d2_iter];       //Data_Out_Check
-                            buf_out3 = Data_Out3[d3_iter];       //Data_Out_Check
-
-                            d0_iter++;
-                            d1_iter++;
-                            d2_iter++;
-                            d3_iter++;
-                            mTr++;
-                            trCount++;
-
-                            kernel_dout = buf_out0.range(31,0);
-                            buf_out0 = buf_out0 >> 32;
-                            ++j;
-
-                        }
-                        else
-                        {
-                            if (j > 47) {
-                                kernel_dout = buf_out3.range(31, 0);
-                                buf_out3 = buf_out3 >> 32;
-                            } else if (j > 31) {
-                                kernel_dout = buf_out2.range(31, 0);
-                                buf_out2 = buf_out2 >> 32;
-                            }
-                            else if (j > 15) {
-                                kernel_dout = buf_out1.range(31, 0);
-                                buf_out1 = buf_out1 >> 32;
-                            }
-                            else {
-                                kernel_dout = buf_out0.range(31, 0);
-                                buf_out0 = buf_out0 >> 32;
-                            }
-                            j+=1;
-                        }
-
-                        try {
-                            // Check if the line is empty or contains non-numeric characters
-                            if (!line.empty() && std::all_of(line.begin(), line.end(), ::isdigit)) {
-                                number = std::stoll(line);
-                                n++;
-                                    if (number != kernel_dout) {
-                                        std::cout << "number mismatch at: " << n << " ; Actual Data: " << number << " ; Kernel Data: " << kernel_dout << std::endl;
-                                        std::cout << "DEBUG J_val: " << j << std::endl;
-                                        std::cout << "DEBUG iter_val: " << d0_iter << std::endl;
-                                        std::cout << "Total Numbers are: " << nrows << std::endl;
-                                        in_file.close();
-                                        return -1;
-                                    }
-                                } 
-                                // else {
-                                //     std::cerr << "Error: Invalid number format in line (ignoring non-numeric or empty line): " << line << std::endl;
-                                // }
-                        } 
-                        catch (const std::exception& e) {
-                            std::cerr << "Error: Exception occurred while converting line to number: " << line << std::endl;
-                        }
-                        ++batch;
-                    }
-                    
-                }
+                oneT = false;
+                T_NUM -= FilRows[i]-numMatched;
             }
             else
             {
-                //discard the metaData
-                // std::cout << "n: " << n << std::endl;
-                // std::cout << "d0_iter: " << d0_iter << std::endl;
-                trCount++;
-                mTr++;
+                T_NUM -= FilRows[i]-(numMatched/(i+1));
             }
         }
-        ++stripeCnt;
-        trCount = 0;
 
-        
-        
     }
-
-    if(n >= nrows)
+    std::cout << "Number of Rows Matched: " << numMatched << std::endl;
+    if(numMatched == T_NUM)
     {
-        std::cout << "Passed, Total Numbers matched: " << n << std::endl;
+        std::cout << "PASSED" << std::endl;
     }
-    else 
+    else
     {
-        std::cout << "Failed, Total Numbers matched: " << n << std::endl;
+        std::cout << "FAILED" << std::endl;
     }
 
-    in_file.close();
-    return 1;
 }
 
 
-void update_patch_data(int32_t *datain0, int32_t *datain1, int32_t *datain2, int32_t *datain3, int32_t *track, uint32_t nrows)
+void update_patch_data(int32_t *datain0, int32_t *datain1, int32_t *datain2, int32_t *datain3, int32_t *track)
 {
-
     _128b *mTr;
     mTr = (_128b*)(track);
 
@@ -1294,7 +1499,7 @@ void update_patch_data(int32_t *datain0, int32_t *datain1, int32_t *datain2, int
     uint16_t gap_val = 0;
     int32_t patch_val = 0;
 
-    int32_t totalCount = nrows;
+    int32_t totalCount = nrows;  // Assuming nrows is defined somewhere globally or passed in
 
     bool latchRL = 1;
     bool latchPA = 1;
@@ -1315,121 +1520,186 @@ void update_patch_data(int32_t *datain0, int32_t *datain1, int32_t *datain2, int
     while(crow < totalCount)
     {
         
-        PLL = mTr->range(7,0);      //8
-        gap_val = mTr->range(23,8);   //16
-        patch_val = mTr->range(55,24);         //32
-        decType = mTr->range(71,64);  //16  (79,64)
-        runLength = mTr->range(95,80);    //16
-        BV = mTr->range(127,96);       //32
+        PLL = mTr->range(7, 0);      
+        gap_val = mTr->range(23, 8);   
+        patch_val = mTr->range(55, 24);  
+        decType = mTr->range(71, 64);
+        runLength = mTr->range(95, 80); 
+        BV = mTr->range(127, 96);      
 
         mTr++;
+
         if(latchRL)
         {
             latchRL = 0;
             TRL = runLength;
         }
 
-
-        if(decType != PATCHED)
+        if(runLength != 0)
         {
-            //Skip
-            data_count += 16;
-            latchPA = 1;
-            //loop control
-            if(TRL <= 64)
-            {
-                latchRL = 1;
-                crow += TRL;
-                TRL = 0;
-            }
-            else
-            {
-                TRL -= 64;
-                crow += 64;
-            }
-            
-        }
-        else
-        {
-            //fix for PLL count to relatch the RL and PA latch
-            //get the start idx from where the patched data is starting, only once
-            if(latchPA)
-            {
-                latchPA = 0;
-                patch_Didx = data_count; //not subtracting bcz added afterwards
-            }
-            //Process
-            if(PLL!=0)  //reading the Patch Gap values
-            {
-                pll_count += 1;
-                if(pll_count == PLL)
-                {
-                    crow += TRL;    //add in the end bcz of last data
-                    pll_count = 0;
-                    latchRL = 1;
-                    latchPA = 1;
-                }
-                //get data index from gap and add the patch value
-                if(gap_val == 255 and patch_val == 0)
-                {
-                    //skip to next, no data updates
-                    offset_gap = gap_val;
-                }
-                else    //update the data
-                {
-                    gap_val +=  prev_gap;
-                    gap_val += offset_gap;
-                    offset_gap = 0;
-                    prev_gap = gap_val;
 
-                    gap_mod = gap_val%64;   //batch repeat after 64
-                    dataPtr = gap_mod/16;   //pointer repeats after 16
-
-                    fdiv = gap_val/64;
-                    subVal = (fdiv*64)+(dataPtr*16);
-                    offset = gap_val-subVal;
-
-                    Data_idx = (fdiv*16) + patch_Didx + offset;
-
-                    switch (dataPtr)
-                    {
-                        case 0:
-                            datain0[Data_idx] += patch_val;
-                            break;
-                        case 1:
-                            datain1[Data_idx] += patch_val;
-                            break;
-                        case 2:
-                            datain2[Data_idx] += patch_val;
-                            break;
-                        case 3:
-                            datain3[Data_idx] += patch_val;
-                            break;
-                        
-                        default:
-                            break;
-                    }
-                }
-
-            }
-            else        //keep reading metadata till you find PLL
+            if(decType != PATCHED)
             {
-                //skip
                 data_count += 16;
-                prev_gap = 0;
-                //loop control
+                latchPA = 1;
+
                 if(TRL <= 64)
                 {
-                    TRL = TRL;
+                    latchRL = 1;
+                    crow += TRL;
+                    TRL = 0;
                 }
                 else
                 {
                     TRL -= 64;
                     crow += 64;
                 }
-                
+            }
+            else
+            {
+                if(latchPA)
+                {
+                    latchPA = 0;
+                    patch_Didx = data_count;
+                }
+
+                if(PLL != 0)  
+                {
+                    pll_count += 1;
+
+                    if(pll_count == PLL)
+                    {
+                        // printf("TRL when PLL done = %d\n", TRL);
+                        crow += TRL;  
+                        pll_count = 0;
+                        latchRL = 1;
+                        latchPA = 1;
+                    }
+
+                    if (gap_val == 255 && patch_val == 0)
+                    {
+                        offset_gap = gap_val;
+                    }
+                    else
+                    {
+                        gap_val += prev_gap;
+                        gap_val += offset_gap;
+                        offset_gap = 0;
+                        prev_gap = gap_val;
+
+                        gap_mod = gap_val % 64;
+                        dataPtr = gap_mod / 16;
+
+                        fdiv = gap_val / 64;
+                        subVal = (fdiv * 64) + (dataPtr * 16);
+                        offset = gap_val - subVal;
+
+                        Data_idx = (fdiv * 16) + patch_Didx + offset;
+
+                        switch (dataPtr)
+                        {
+                            case 0:
+                                if (Data_idx < 0) printf("Error: Data_idx < 0\n");
+                                datain0[Data_idx] += patch_val;
+                                break;
+                            case 1:
+                                if (Data_idx < 0) printf("Error: Data_idx < 0\n");
+                                datain1[Data_idx] += patch_val;
+                                break;
+                            case 2:
+                                if (Data_idx < 0) printf("Error: Data_idx < 0\n");
+                                datain2[Data_idx] += patch_val;
+                                break;
+                            case 3:
+                                if (Data_idx < 0) printf("Error: Data_idx < 0\n");
+                                datain3[Data_idx] += patch_val;
+                                break;
+                            default:
+                                printf("Error: Invalid dataPtr = %d\n", dataPtr);
+                                break;
+                        }
+                    }
+
+                }
+                else
+                {
+                    data_count += 16;
+                    prev_gap = 0;
+
+                    if(TRL <= 64)
+                    {
+                        TRL = TRL;
+                    }
+                    else
+                    {
+                        TRL -= 64;
+                        crow += 64;
+                    }
+                }
             }
         }
+        else
+        {
+            printf("Error: runLength is 0, exiting program!\n");
+            exit(EXIT_FAILURE);  // Immediately exit the program with failure status
+        }
     }
-
 }
+
+
+// void processFlags(const std::vector<_512b, tapa::aligned_allocator<_512b>>& data) {
+//     // Open the file containing 0s and 1s
+//     std::ifstream flagFile(filFLAG);
+
+//     if (!flagFile.is_open()) {
+//         std::cerr << "Error opening flags file." << std::endl;
+//         return;
+//     }
+
+//     // Initialize counters
+//     uint16_t bitCounter = 0;
+//     uint32_t vectorIndex = 0;
+//     bool NM_Flag = 0;
+//     bool myData = 0;
+
+//     uint32_t idx = 1;
+
+//     // Read flags from the file and compare with the data
+//     bool flag = 0;
+//     while (flagFile >> flag) {
+//         // Assuming flag is 0 or 1 in the file
+
+//         // Extract the relevant 64 bits from the _512b vector
+//         _512b dataChunk = data[vectorIndex];
+//         myData = dataChunk.range(bitCounter,bitCounter);
+
+//         // Compare the flag with the corresponding bit in the data
+//         if (myData == flag) {
+//             // std::cout << "Flag at position idx " << idx << " bitcounter " << bitCounter << " matches." << std::endl;
+//         } else {
+//             NM_Flag = 1;
+//             // std::cout << "Flag at position idx " << idx << " bitcounter " << bitCounter << " does not match." << std::endl;
+//         }
+
+//         // Move to the next bit
+//         bitCounter = (bitCounter + 1) % 64;
+
+//         // Move to the next vector if necessary
+//         if (bitCounter == 0) {
+//             ++vectorIndex;
+//         }
+
+//         ++idx;
+//     }
+
+//     flagFile.close();
+//     if(NM_Flag == 0)
+//     {
+//         std::cout << "PASSED, All flags matched: " << (idx-1) << std::endl;
+//     }
+//     else
+//     {
+//         std::cout << "FAILED, Flags have mismatch" << std::endl;
+//     }
+    
+// }

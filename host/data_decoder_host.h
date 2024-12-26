@@ -1,5 +1,5 @@
-#ifndef data_decoder_host_h
-#define data_decoder_host_h
+#ifndef orc_proc_hostF_h
+#define orc_proc_hostF_h
 
 #include <iostream>
 #include <fstream>
@@ -15,8 +15,7 @@
 #include <aio.h>
 #include <fcntl.h>
 #include <chrono>
-#include <numeric>
-#include <thread>    
+#include <thread>
 
 #include <orc/orc-config.hh>
 #include <orc/Reader.hh>
@@ -43,6 +42,7 @@
 
 #define CL_DEVICE_PCIE_BDF              0x1120  // BUS/DEVICE/FUNCTION
 #include "opencl_util.h"
+//g++ -O2 -o decoder data_decoder.cpp data_decoder_host.cpp -I/local-scratch/Xilinx/Vitis_HLS/2021.2/include/ -L/opt/xilinx/xrt/lib/ -lstdc++ -lpthread -lrt -lgmp -lmpfr -ltapa -lfrt -lglog -lgflags -lOpenCL
 
 extern "C" {
     int aio_write(struct aiocb*);
@@ -52,32 +52,39 @@ extern "C" {
     int aio_suspend(const struct aiocb * const cblist[], int n, const struct timespec *timeout);
 }
 
-#define WAIT_MAX 2147483
-// #define PRINT_DEBUG
 
 int nvmeFd = -1;
+const uint32_t NDelta_BitMap[32] = {1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11,
+                                12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+                                23, 24, 26, 28, 30, 32, 40, 48, 56, 64};
 const uint32_t AXI_WIDTH = 512;
+const uint32_t AXI_BYTES = 512/8;
+const uint16_t AXI_WIDTH_H = 256;
 const uint16_t AXI_WIDTH_HH = 128;
+typedef ap_uint<AXI_WIDTH_H> _256b;
 typedef ap_uint<AXI_WIDTH> _512b;
 typedef ap_int<AXI_WIDTH> _512bi;
 typedef ap_uint<AXI_WIDTH_HH> _128b;
 typedef ap_uint<32> _32b;
 
-const uint32_t BUFFERS_IN = 2;
-const uint32_t BUFFERS_OUT = 10;
-const uint32_t ALIGNED_BYTES = 4096;
-// const std::string TARGET_DEVICE_NAME = "xilinx_u280_xdma_201920_3";
+// #define PRINT_DEBUG
+const bool dataflow = 1;        //**********DATAFLOW FLAG***************//
+const uint32_t DATA_MUL = 15;
 
-bool dataflow = true;
-bool dataVerif = true;
-const uint32_t RSIZE_DIV = 16;   //for SR it should be 4 else 16
-const uint32_t PIPELINE_DEPTH = 576;
-std::string orc_file = "test_data/8_bit.orc";//   "8_bit_data_MS_orc.orc"  "test_data/8_bit.orc", "/localhdd/awa159/tpcds88.orc"; , /localhdd/awa159/orc_dataset/orc_decData/lineitem_col1_16orc.orc, /mnt/smartssd_0n/awa159/orc_decData/lineitem_col1_16orc.orc
-std::string check_file = "test_data/8_bit_data.bin";    //     "8_bit_data.bin"   "test_data/8_bit_data.bin" , /localhdd/awa159/orc_dataset/orc_decData/lineitem_col1.bin, /mnt/smartssd_0n/awa159/orc_decData/lineitem_col1.bin
+const uint32_t BUFFERS_IN = 2;
+const uint32_t BUFFERS_OUT = 12;
+const uint32_t ALIGNED_BYTES = 4096;
+
+uint32_t nrows = 0;
+const uint32_t Myrows = 855000; 
+const uint64_t FILE_CHUNKS = 1;
+const uint64_t OFFSET_MUL = 0;  //TURN OFF OFFSET IF want to read same data always
 
 const uint8_t SR = 0;
 const uint8_t DIRECT = 1;
 const uint8_t PATCHED = 2;
 const uint8_t DELTA = 3;
 
-#endif // data_decoder_host_h
+
+
+#endif // orc_proc_host_h
