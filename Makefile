@@ -52,8 +52,8 @@ endif
 TOP := orc_proc
 
 SRC_NAME := orc_proc
-SOURCES := kernel/$(SRC_NAME).cpp kernel/$(SRC_NAME)_host.cpp
-DSOURCES := kernel/$(SRC_NAME).cpp kernel/$(SRC_NAME)_hostF.cpp
+SOURCES := kernel/$(SRC_NAME).cpp host/$(SRC_NAME)_host.cpp
+DSOURCES := kernel/$(SRC_NAME).cpp host/$(SRC_NAME)_host_1S1C.cpp
 
 
 all: $(OUTPUT) rtl_gen

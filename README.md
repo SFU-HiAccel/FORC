@@ -33,25 +33,25 @@ To build the RTL design run the following commands.
 
 ```shell
 % make rtl_gen
-% cd decoder.xilinx_u280_xdma_201920_3.hw.xo.tapa/run-1/
-% bash decoder.xilinx_u280_xdma_201920_3.hw_generate_bitstream.sh
+% cd orc_proc.xilinx_u280_xdma_201920_3.hw.xo.tapa/run-1/
+% bash orc_proc.xilinx_u280_xdma_201920_3.hw_generate_bitstream.sh
 % cd ../..
 ```
 
 To build and run the Host Code run the following commands.
 
-For Single Stripe Single Column
+For Single Stripe Single Column to test with TAPA or run csim. CHECK "ORC FILTER" docx file for understanding the filter configurations.
 
 ```shell
-% make Sgpp
-% ./decoder1S1C --bitstream decoder.xilinx_u280_xdma_201920_3.hw.xo.tapa/run-1/vitis_run_hw/data_decoding_xilinx_u280_xdma_201920_3.xclbin
+% make Dgpp
+% ./Dorc_final --bitstream xclbin/FORC.xclbin --comp <compressed-file-path> --orig <original-file-path> --is_orc=true --RR <right-range-of-filter> --VERIF=true
 ```
 
 For Dataflow HW Runs. The code has been tested with g++ version of 7.5.0.
 
 ```shell
 % make gpp
-% ./decoder --bitstream decoder.xilinx_u280_xdma_201920_3.hw.xo.tapa/run-1/vitis_run_hw/data_decoding_xilinx_u280_xdma_201920_3.xclbin
+% ./orc_final --bitstream xclbin/FORC.xclbin --comp <compressed-file-path> --orig <original-file-path> --is_orc=true --RR <right-range-of-filter> --VERIF=true
 ```
 
 # DESIGN LIMITATIONS

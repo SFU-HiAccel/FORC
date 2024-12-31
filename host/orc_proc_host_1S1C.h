@@ -1,5 +1,5 @@
-#ifndef orc_proc_host_h
-#define orc_proc_host_h
+#ifndef orc_proc_host_1S1C_h
+#define orc_proc_host_1S1C_h
 
 #include <iostream>
 #include <fstream>

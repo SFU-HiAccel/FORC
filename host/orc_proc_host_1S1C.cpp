@@ -1,4 +1,4 @@
-#include "orc_proc_host.h"
+#include "orc_proc_host_1S1C.h"
 
 void orc_proc(tapa::mmap<_512b> input_port, 
                     tapa::mmap<_512b> FilterConf_port,

@@ -1,5 +1,5 @@
-#ifndef orc_proc_hostF_h
-#define orc_proc_hostF_h
+#ifndef orc_proc_host_h
+#define orc_proc_host_h
 
 #include <iostream>
 #include <fstream>
@@ -69,7 +69,7 @@ typedef ap_uint<32> _32b;
 
 // #define PRINT_DEBUG
 const bool dataflow = 1;        //**********DATAFLOW FLAG***************//
-const uint32_t DATA_MUL = 15;
+const uint32_t DATA_MUL = 1;
 
 const uint32_t BUFFERS_IN = 2;
 const uint32_t BUFFERS_OUT = 12;
